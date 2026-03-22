@@ -553,8 +553,151 @@ body{font-family:'Plus Jakarta Sans',sans-serif;background:var(--bg);color:var(-
   animation:fadeUp 0.3s ease;
   display:flex;align-items:center;gap:8px;
 }
+/* ════════════════════════════════════
+   CUSTOM VIDEO PLAYER
+════════════════════════════════════ */
+.cvp{
+  position:relative;width:100%;height:100%;background:#000;
+  overflow:hidden;user-select:none;
+}
+.cvp video{width:100%;height:100%;object-fit:contain;display:block}
+
+/* Spinner */
+.cvp-spinner{
+  position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
+  pointer-events:none;opacity:0;transition:opacity 0.2s;
+}
+.cvp-spinner.show{opacity:1}
+.cvp-spin{
+  width:44px;height:44px;border-radius:50%;
+  border:3px solid rgba(255,255,255,0.15);
+  border-top-color:#fff;
+  animation:spin 0.8s linear infinite;
+}
+@keyframes spin{to{transform:rotate(360deg)}}
+
+/* Big play overlay */
+.cvp-play-overlay{
+  position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
+  background:rgba(0,0,0,0.4);cursor:pointer;
+  opacity:1;transition:opacity 0.25s;
+}
+.cvp-play-overlay.hidden{opacity:0;pointer-events:none}
+.cvp-play-big{
+  width:72px;height:72px;border-radius:50%;
+  background:rgba(108,99,255,0.85);
+  display:flex;align-items:center;justify-content:center;
+  font-size:26px;color:#fff;padding-left:4px;
+  box-shadow:0 0 40px rgba(108,99,255,0.5);
+  transition:transform 0.15s,background 0.15s;
+}
+.cvp-play-overlay:hover .cvp-play-big{transform:scale(1.08);background:var(--accent)}
+
+/* Click area */
+.cvp-click{position:absolute;inset:0;cursor:pointer;z-index:1}
+
+/* Controls */
+.cvp-controls{
+  position:absolute;bottom:0;left:0;right:0;z-index:10;
+  background:linear-gradient(transparent,rgba(0,0,0,0.85));
+  padding:28px 12px 10px;
+  transform:translateY(0);transition:transform 0.25s,opacity 0.25s;
+  opacity:1;
+}
+.cvp.hide-controls .cvp-controls{transform:translateY(100%);opacity:0}
+.cvp.hide-controls .cvp-click{cursor:none}
+
+/* Progress bar */
+.cvp-progress{
+  position:relative;height:16px;cursor:pointer;margin-bottom:8px;
+  display:flex;align-items:center;
+}
+.cvp-progress-bg,.cvp-progress-buf,.cvp-progress-fill{
+  position:absolute;left:0;height:4px;border-radius:4px;
+  pointer-events:none;transition:height 0.1s;
+}
+.cvp-progress:hover .cvp-progress-bg,
+.cvp-progress:hover .cvp-progress-buf,
+.cvp-progress:hover .cvp-progress-fill{height:6px}
+.cvp-progress-bg{width:100%;background:rgba(255,255,255,0.2)}
+.cvp-progress-buf{background:rgba(255,255,255,0.4);width:0}
+.cvp-progress-fill{background:var(--accent);width:0}
+.cvp-progress-thumb{
+  position:absolute;width:14px;height:14px;border-radius:50%;
+  background:#fff;pointer-events:none;
+  transform:translate(-50%,-50%) scale(0);top:50%;left:0;
+  transition:transform 0.1s;box-shadow:0 0 6px rgba(0,0,0,0.5);
+}
+.cvp-progress:hover .cvp-progress-thumb{transform:translate(-50%,-50%) scale(1)}
+.cvp-progress-tooltip{
+  position:absolute;bottom:20px;
+  background:rgba(0,0,0,0.8);color:#fff;
+  font-size:11px;font-weight:600;padding:3px 7px;border-radius:4px;
+  pointer-events:none;transform:translateX(-50%);white-space:nowrap;
+  opacity:0;transition:opacity 0.1s;
+}
+.cvp-progress:hover .cvp-progress-tooltip{opacity:1}
+
+/* Controls bar */
+.cvp-bar{display:flex;align-items:center;justify-content:space-between;gap:8px}
+.cvp-left,.cvp-right{display:flex;align-items:center;gap:4px}
+.cvp-btn{
+  background:none;border:none;color:#fff;cursor:pointer;
+  padding:6px;border-radius:6px;display:flex;align-items:center;justify-content:center;
+  opacity:0.85;transition:opacity 0.15s,background 0.15s;flex-shrink:0;
+}
+.cvp-btn:hover{opacity:1;background:rgba(255,255,255,0.12)}
+.cvp-time{
+  font-size:11.5px;font-weight:600;color:rgba(255,255,255,0.9);
+  white-space:nowrap;padding:0 4px;
+}
+.cvp-vol-slider{
+  width:70px;height:4px;-webkit-appearance:none;appearance:none;
+  background:rgba(255,255,255,0.3);border-radius:4px;cursor:pointer;outline:none;
+}
+.cvp-vol-slider::-webkit-slider-thumb{
+  -webkit-appearance:none;width:12px;height:12px;border-radius:50%;
+  background:#fff;cursor:pointer;
+}
+
+/* Speed menu */
+.cvp-speed-wrap{position:relative}
+.cvp-speed-btn{font-size:12px;font-weight:700;min-width:32px;padding:4px 6px}
+.cvp-speed-menu{
+  position:absolute;bottom:38px;right:0;
+  background:rgba(15,17,28,0.97);border:1px solid var(--border2);
+  border-radius:10px;padding:6px;min-width:90px;
+  display:none;z-index:20;box-shadow:0 8px 32px rgba(0,0,0,0.6);
+}
+.cvp-speed-menu.open{display:block}
+.cvp-speed-title{
+  font-size:10px;font-weight:700;color:var(--text3);
+  text-transform:uppercase;letter-spacing:1px;
+  padding:4px 8px 8px;
+}
+.cvp-speed-opt{
+  padding:7px 12px;border-radius:6px;font-size:13px;font-weight:600;
+  color:var(--text2);cursor:pointer;transition:background 0.1s;
+}
+.cvp-speed-opt:hover{background:rgba(108,99,255,0.15);color:var(--text)}
+.cvp-speed-opt.active{color:var(--accent2);background:rgba(108,99,255,0.12)}
+
+/* Error state */
+.cvp-error{
+  position:absolute;inset:0;display:flex;flex-direction:column;
+  align-items:center;justify-content:center;gap:12px;
+  background:rgba(0,0,0,0.85);z-index:20;
+}
+.cvp-error-icon{font-size:36px}
+.cvp-error-msg{font-size:14px;color:var(--text2);text-align:center;max-width:280px}
+.cvp-error-btn{
+  background:var(--accent);color:#fff;border:none;
+  border-radius:8px;padding:8px 20px;font-size:13px;font-weight:600;
+  cursor:pointer;font-family:'Plus Jakarta Sans',sans-serif;
+  transition:background 0.15s;
+}
+.cvp-error-btn:hover{background:#5b52e8}
 </style>
-</head>
 <body>
 
 <!-- ══════════════════════════════════
@@ -740,13 +883,95 @@ body{font-family:'Plus Jakarta Sans',sans-serif;background:var(--bg);color:var(-
     <!-- Video -->
     <div class="player-left">
       <div class="video-wrap" id="videoWrap">
-        <iframe id="videoFrame" allowfullscreen allow="autoplay"></iframe>
+        <!-- Custom Video Player -->
+        <div class="cvp" id="cvp">
+          <video id="videoEl" preload="metadata" playsinline></video>
+
+          <!-- Buffering spinner -->
+          <div class="cvp-spinner" id="cvpSpinner">
+            <div class="cvp-spin"></div>
+          </div>
+
+          <!-- Big play button overlay -->
+          <div class="cvp-play-overlay" id="cvpPlayOverlay" onclick="cvpTogglePlay()">
+            <div class="cvp-play-big">▶</div>
+          </div>
+
+          <!-- Click area to toggle play -->
+          <div class="cvp-click" id="cvpClick" onclick="cvpTogglePlay()" ondblclick="cvpFullscreen()"></div>
+
+          <!-- Controls bar -->
+          <div class="cvp-controls" id="cvpControls">
+            <!-- Progress bar -->
+            <div class="cvp-progress" id="cvpProgress" onmousedown="cvpSeekStart(event)" ontouchstart="cvpSeekStart(event)">
+              <div class="cvp-progress-bg"></div>
+              <div class="cvp-progress-buf" id="cvpBuf"></div>
+              <div class="cvp-progress-fill" id="cvpFill"></div>
+              <div class="cvp-progress-thumb" id="cvpThumb"></div>
+              <div class="cvp-progress-tooltip" id="cvpTooltip">0:00</div>
+            </div>
+
+            <div class="cvp-bar">
+              <!-- Left controls -->
+              <div class="cvp-left">
+                <button class="cvp-btn" id="cvpPlayBtn" onclick="cvpTogglePlay()" title="Play/Pause (Space)">
+                  <svg id="cvpPlayIcon" viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+                </button>
+                <button class="cvp-btn" onclick="cvpSkip(-10)" title="Rewind 10s">
+                  <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 .49-3.8"/><text x="8" y="15" font-size="6" fill="currentColor" stroke="none" font-weight="bold">10</text></svg>
+                </button>
+                <button class="cvp-btn" onclick="cvpSkip(10)" title="Forward 10s">
+                  <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-.49-3.8"/><text x="8" y="15" font-size="6" fill="currentColor" stroke="none" font-weight="bold">10</text></svg>
+                </button>
+
+                <!-- Volume -->
+                <button class="cvp-btn" id="cvpVolBtn" onclick="cvpToggleMute()" title="Mute/Unmute (M)">
+                  <svg id="cvpVolIcon" viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/></svg>
+                </button>
+                <input class="cvp-vol-slider" id="cvpVolSlider" type="range" min="0" max="1" step="0.05" value="1" oninput="cvpSetVolume(this.value)" title="Volume"/>
+
+                <span class="cvp-time" id="cvpTime">0:00 / 0:00</span>
+              </div>
+
+              <!-- Right controls -->
+              <div class="cvp-right">
+                <!-- Speed -->
+                <div class="cvp-speed-wrap">
+                  <button class="cvp-btn cvp-speed-btn" id="cvpSpeedBtn" onclick="cvpToggleSpeedMenu()" title="Playback Speed">1×</button>
+                  <div class="cvp-speed-menu" id="cvpSpeedMenu">
+                    <div class="cvp-speed-title">Speed</div>
+                    ${[0.5,0.75,1,1.25,1.5,1.75,2].map(s=>`<div class="cvp-speed-opt ${s===1?'active':''}" onclick="cvpSetSpeed(${s})">${s}×</div>`).join('')}
+                  </div>
+                </div>
+
+                <!-- Open in Drive -->
+                <button class="cvp-btn" id="cvpDriveBtn" onclick="cvpOpenDrive()" title="Open in Google Drive">
+                  <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+                </button>
+
+                <!-- Fullscreen -->
+                <button class="cvp-btn" id="cvpFsBtn" onclick="cvpFullscreen()" title="Fullscreen (F)">
+                  <svg id="cvpFsIcon" viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2"><polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/><line x1="21" y1="3" x2="14" y2="10"/><line x1="3" y1="21" x2="10" y2="14"/></svg>
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <!-- Error state -->
+          <div class="cvp-error" id="cvpError" style="display:none">
+            <div class="cvp-error-icon">⚠️</div>
+            <div class="cvp-error-msg" id="cvpErrorMsg">Unable to load video</div>
+            <button class="cvp-error-btn" onclick="cvpRetry()">Try Again</button>
+            <button class="cvp-error-btn" onclick="cvpOpenDrive()">Open in Drive</button>
+          </div>
+        </div>
       </div>
       <div class="player-info">
         <div class="player-title" id="playerTitle">Loading...</div>
         <div class="player-meta">
           <span id="playerSubject" style="color:var(--accent2);font-weight:600"></span>
           <span id="playerChapter"></span>
+          <span id="playerDoneTag"></span>
         </div>
       </div>
     </div>
@@ -789,6 +1014,278 @@ const ALLOWED_EMAILS = ["kautilya.2355@gmail.com"];
 const driveView     = id => `https://drive.google.com/file/d/${id}/view`;
 const driveDownload = id => `https://drive.google.com/uc?export=download&id=${id}`;
 const driveEmbed    = id => `https://drive.google.com/file/d/${id}/preview`;
+// Direct streaming URL — tries to stream mp4 directly
+const driveStream   = id => `https://drive.google.com/uc?export=download&confirm=t&id=${id}`;
+
+// ════════════════════════════════════
+// CUSTOM VIDEO PLAYER ENGINE
+// ════════════════════════════════════
+let cvpCurrentId  = null;
+let cvpSeeking    = false;
+let cvpHideTimer  = null;
+let cvpDriveId    = null;
+
+function cvpInit() {
+  const v = document.getElementById('videoEl');
+  if (!v) return;
+
+  v.addEventListener('waiting',    () => cvpShowSpinner(true));
+  v.addEventListener('canplay',    () => cvpShowSpinner(false));
+  v.addEventListener('playing',    () => { cvpShowSpinner(false); cvpUpdatePlayIcon(true); cvpHideOverlay(); });
+  v.addEventListener('pause',      () => cvpUpdatePlayIcon(false));
+  v.addEventListener('ended',      () => { cvpUpdatePlayIcon(false); cvpShowOverlay(); });
+  v.addEventListener('timeupdate', cvpOnTimeUpdate);
+  v.addEventListener('progress',   cvpOnProgress);
+  v.addEventListener('durationchange', cvpUpdateTime);
+  v.addEventListener('error',      cvpOnError);
+  v.addEventListener('loadedmetadata', () => cvpShowSpinner(false));
+
+  // Hide controls after 3s of no mouse movement
+  const cvpEl = document.getElementById('cvp');
+  cvpEl?.addEventListener('mousemove', cvpResetHideTimer);
+  cvpEl?.addEventListener('mouseleave', () => {
+    if (!document.getElementById('videoEl').paused) cvpStartHideTimer();
+  });
+
+  // Keyboard shortcuts inside player
+  document.addEventListener('keydown', e => {
+    const page = document.querySelector('.page.active')?.id;
+    if (page !== 'playerPage') return;
+    if (document.getElementById('searchOverlay').classList.contains('open')) return;
+    if (e.target.tagName === 'INPUT') return;
+    switch(e.key) {
+      case ' ': case 'k': e.preventDefault(); cvpTogglePlay(); break;
+      case 'ArrowRight': e.preventDefault(); cvpSkip(10); break;
+      case 'ArrowLeft':  e.preventDefault(); cvpSkip(-10); break;
+      case 'ArrowUp':    e.preventDefault(); cvpChangeVol(0.1); break;
+      case 'ArrowDown':  e.preventDefault(); cvpChangeVol(-0.1); break;
+      case 'f': case 'F': cvpFullscreen(); break;
+      case 'm': case 'M': cvpToggleMute(); break;
+    }
+  });
+}
+
+function cvpLoad(fileId) {
+  cvpDriveId = fileId;
+  const v    = document.getElementById('videoEl');
+  if (!v) return;
+
+  // Hide error, show spinner
+  document.getElementById('cvpError').style.display = 'none';
+  cvpShowSpinner(true);
+  cvpShowOverlay();
+  cvpUpdatePlayIcon(false);
+
+  // Reset progress
+  document.getElementById('cvpFill').style.width  = '0';
+  document.getElementById('cvpBuf').style.width   = '0';
+  document.getElementById('cvpThumb').style.left  = '0';
+  document.getElementById('cvpTime').textContent  = '0:00 / 0:00';
+
+  // Set src — direct stream URL
+  v.src = driveStream(fileId);
+  v.load();
+}
+
+function cvpTogglePlay() {
+  const v = document.getElementById('videoEl');
+  if (!v.src) return;
+  if (v.paused) {
+    v.play().catch(() => cvpOnError());
+    cvpStartHideTimer();
+  } else {
+    v.pause();
+    cvpClearHideTimer();
+    cvpShowControls();
+  }
+}
+
+function cvpUpdatePlayIcon(playing) {
+  const icon = document.getElementById('cvpPlayIcon');
+  if (!icon) return;
+  icon.innerHTML = playing
+    ? `<rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/>`
+    : `<polygon points="5 3 19 12 5 21 5 3"/>`;
+}
+
+function cvpHideOverlay() {
+  document.getElementById('cvpPlayOverlay')?.classList.add('hidden');
+}
+function cvpShowOverlay() {
+  document.getElementById('cvpPlayOverlay')?.classList.remove('hidden');
+}
+
+function cvpSkip(sec) {
+  const v = document.getElementById('videoEl');
+  v.currentTime = Math.max(0, Math.min(v.duration || 0, v.currentTime + sec));
+  cvpFlash(sec > 0 ? `+${sec}s` : `${sec}s`);
+}
+
+function cvpFlash(msg) {
+  const el = document.createElement('div');
+  el.textContent = msg;
+  el.style.cssText = `position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);
+    background:rgba(0,0,0,0.7);color:#fff;padding:8px 18px;border-radius:8px;
+    font-size:16px;font-weight:700;pointer-events:none;z-index:30;
+    animation:fadeUp 0.6s ease forwards;`;
+  document.getElementById('cvp').appendChild(el);
+  setTimeout(() => el.remove(), 600);
+}
+
+function cvpOnTimeUpdate() {
+  if (cvpSeeking) return;
+  const v = document.getElementById('videoEl');
+  const pct = v.duration ? (v.currentTime / v.duration) * 100 : 0;
+  document.getElementById('cvpFill').style.width  = pct + '%';
+  document.getElementById('cvpThumb').style.left  = pct + '%';
+  cvpUpdateTime();
+}
+
+function cvpOnProgress() {
+  const v = document.getElementById('videoEl');
+  if (!v.duration) return;
+  try {
+    const buf = v.buffered;
+    if (buf.length) {
+      const pct = (buf.end(buf.length - 1) / v.duration) * 100;
+      document.getElementById('cvpBuf').style.width = pct + '%';
+    }
+  } catch(e) {}
+}
+
+function cvpUpdateTime() {
+  const v = document.getElementById('videoEl');
+  document.getElementById('cvpTime').textContent =
+    `${cvpFmt(v.currentTime)} / ${cvpFmt(v.duration || 0)}`;
+}
+
+function cvpFmt(s) {
+  if (!s || isNaN(s)) return '0:00';
+  const m = Math.floor(s / 60), sec = Math.floor(s % 60);
+  return `${m}:${sec.toString().padStart(2,'0')}`;
+}
+
+// Seek
+function cvpSeekStart(e) {
+  cvpSeeking = true;
+  cvpDoSeek(e);
+  const move = ev => cvpDoSeek(ev.touches?.[0] || ev);
+  const up   = () => { cvpSeeking = false; document.removeEventListener('mousemove',move); document.removeEventListener('mouseup',up); document.removeEventListener('touchmove',move); document.removeEventListener('touchend',up); };
+  document.addEventListener('mousemove', move);
+  document.addEventListener('mouseup', up);
+  document.addEventListener('touchmove', move);
+  document.addEventListener('touchend', up);
+}
+
+function cvpDoSeek(e) {
+  const bar = document.getElementById('cvpProgress');
+  const v   = document.getElementById('videoEl');
+  if (!v.duration) return;
+  const rect = bar.getBoundingClientRect();
+  const pct  = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+  v.currentTime = pct * v.duration;
+  document.getElementById('cvpFill').style.width = (pct * 100) + '%';
+  document.getElementById('cvpThumb').style.left = (pct * 100) + '%';
+  // Tooltip
+  const tt = document.getElementById('cvpTooltip');
+  tt.textContent = cvpFmt(pct * v.duration);
+  tt.style.left  = (pct * 100) + '%';
+}
+
+// Volume
+function cvpSetVolume(val) {
+  const v = document.getElementById('videoEl');
+  v.volume = val;
+  v.muted  = val == 0;
+  cvpUpdateVolIcon(val);
+}
+function cvpChangeVol(delta) {
+  const v = document.getElementById('videoEl');
+  const nv = Math.max(0, Math.min(1, v.volume + delta));
+  v.volume = nv;
+  document.getElementById('cvpVolSlider').value = nv;
+  cvpUpdateVolIcon(nv);
+}
+function cvpToggleMute() {
+  const v = document.getElementById('videoEl');
+  v.muted = !v.muted;
+  cvpUpdateVolIcon(v.muted ? 0 : v.volume);
+  document.getElementById('cvpVolSlider').value = v.muted ? 0 : v.volume;
+}
+function cvpUpdateVolIcon(vol) {
+  const icon = document.getElementById('cvpVolIcon');
+  if (!icon) return;
+  if (vol == 0) {
+    icon.innerHTML = `<polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><line x1="23" y1="9" x2="17" y2="15"/><line x1="17" y1="9" x2="23" y2="15"/>`;
+  } else if (vol < 0.5) {
+    icon.innerHTML = `<polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/>`;
+  } else {
+    icon.innerHTML = `<polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/>`;
+  }
+}
+
+// Speed
+function cvpToggleSpeedMenu() {
+  document.getElementById('cvpSpeedMenu').classList.toggle('open');
+}
+function cvpSetSpeed(s) {
+  document.getElementById('videoEl').playbackRate = s;
+  document.getElementById('cvpSpeedBtn').textContent = s + '×';
+  document.querySelectorAll('.cvp-speed-opt').forEach(el => {
+    el.classList.toggle('active', parseFloat(el.textContent) === s);
+  });
+  document.getElementById('cvpSpeedMenu').classList.remove('open');
+}
+
+// Fullscreen
+function cvpFullscreen() {
+  const el = document.getElementById('cvp');
+  if (!document.fullscreenElement) {
+    el.requestFullscreen?.() || el.webkitRequestFullscreen?.();
+  } else {
+    document.exitFullscreen?.() || document.webkitExitFullscreen?.();
+  }
+}
+
+// Controls auto-hide
+function cvpShowControls() {
+  document.getElementById('cvp')?.classList.remove('hide-controls');
+}
+function cvpStartHideTimer() {
+  cvpClearHideTimer();
+  cvpHideTimer = setTimeout(() => {
+    const v = document.getElementById('videoEl');
+    if (!v?.paused) document.getElementById('cvp')?.classList.add('hide-controls');
+  }, 3000);
+}
+function cvpClearHideTimer() {
+  clearTimeout(cvpHideTimer);
+}
+function cvpResetHideTimer() {
+  cvpShowControls();
+  cvpStartHideTimer();
+}
+function cvpShowSpinner(show) {
+  document.getElementById('cvpSpinner')?.classList.toggle('show', show);
+}
+
+// Error handling
+function cvpOnError() {
+  cvpShowSpinner(false);
+  const err = document.getElementById('cvpError');
+  const msg = document.getElementById('cvpErrorMsg');
+  if (err) {
+    err.style.display = 'flex';
+    msg.textContent = 'This video cannot be streamed directly. Click "Open in Drive" to watch it.';
+  }
+}
+function cvpRetry() {
+  document.getElementById('cvpError').style.display = 'none';
+  if (cvpDriveId) cvpLoad(cvpDriveId);
+}
+function cvpOpenDrive() {
+  if (cvpDriveId) window.open(driveView(cvpDriveId), '_blank');
+}
 
 // ════════════════════════════════════
 // SUBJECTS DATA
@@ -2297,17 +2794,18 @@ function openPlayer(subId, chIdx, lecNum) {
   currentLecture   = lec;
   currentChapter   = ch;
 
-  document.getElementById('videoFrame').src = driveEmbed(lec.videoId);
+  // Load video in custom player
+  cvpLoad(lec.videoId);
+
   document.getElementById('playerTitle').textContent = `${ch.name} ${String(lec.num).padStart(2,'0')} : ${lec.title}`;
   document.getElementById('playerSubject').textContent = sub.short;
   document.getElementById('playerChapter').textContent = ch.code + ' — ' + ch.name;
   document.getElementById('playerSubjectCrumb').textContent = sub.short;
   document.getElementById('playerLectureCrumb').textContent = 'Lecture ' + lec.num;
 
-  ['userAv4','userName4'].forEach(id => {
-    const el = document.getElementById(id);
-    if (!el) return;
-  });
+  // Show done status in meta
+  const doneTag = document.getElementById('playerDoneTag');
+  if (doneTag) doneTag.textContent = isLectureDone(subId, chIdx, lecNum) ? ' · ✅ Completed' : '';
 
   activePrTab = 'attachments';
   document.querySelectorAll('.pr-tab').forEach(t => t.classList.remove('active'));
@@ -2382,7 +2880,7 @@ function renderPlayerRight() {
 }
 
 function playDppVideo(videoId, num) {
-  document.getElementById('videoFrame').src = driveEmbed(videoId);
+  cvpLoad(videoId);
   document.getElementById('playerTitle').textContent = currentChapter.name + ' — DPP Solution Video ' + num;
 }
 
@@ -2451,7 +2949,7 @@ function openModal(subId, chIdx, lecNum) {
                 <div class="modal-item-meta">Video</div>
               </div>
               <div class="modal-btns">
-                <button class="mbtn watch" onclick="openPlayer('${subId}',${chIdx},${lec.num});document.getElementById('videoFrame').src='${driveEmbed(vid)}';closeModal()">▶ Play</button>
+                <button class="mbtn watch" onclick="openPlayer('${subId}',${chIdx},${lec.num});setTimeout(()=>cvpLoad('${vid}'),100);closeModal()">▶ Play</button>
                 <a class="mbtn outline" href="${driveView(vid)}" target="_blank">Open</a>
               </div>
             </div>
@@ -2483,6 +2981,7 @@ function showToast(msg) {
 // ════════════════════════════════════
 window.onload = () => {
   initKeyboardShortcuts();
+  cvpInit();
   let tries = 0;
   const initGoogle = () => {
     if (typeof google !== 'undefined' && google.accounts) {
