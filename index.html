@@ -553,160 +553,6 @@ body{font-family:'Plus Jakarta Sans',sans-serif;background:var(--bg);color:var(-
   animation:fadeUp 0.3s ease;
   display:flex;align-items:center;gap:8px;
 }
-
-/* ════════════════════════════════════
-   SEARCH OVERLAY
-════════════════════════════════════ */
-#searchOverlay{
-  display:none;position:fixed;inset:0;z-index:800;
-  background:rgba(0,0,0,0.75);backdrop-filter:blur(6px);
-  align-items:flex-start;justify-content:center;padding-top:80px;
-}
-#searchOverlay.open{display:flex}
-.search-box{
-  width:640px;max-width:95vw;
-  background:var(--surface);
-  border:1px solid var(--border2);
-  border-radius:16px;overflow:hidden;
-  box-shadow:0 20px 60px rgba(0,0,0,0.7);
-  animation:fadeUp 0.18s ease;
-}
-.search-input-row{
-  display:flex;align-items:center;gap:12px;
-  padding:14px 18px;border-bottom:1px solid var(--border);
-}
-.search-input-row .s-icon{font-size:18px;color:var(--text3)}
-#searchInput{
-  flex:1;background:none;border:none;outline:none;
-  font-size:16px;font-weight:500;color:var(--text);
-  font-family:'Plus Jakarta Sans',sans-serif;
-}
-#searchInput::placeholder{color:var(--text3)}
-.search-kbd{
-  font-size:11px;color:var(--text3);
-  background:var(--surface2);border:1px solid var(--border2);
-  border-radius:5px;padding:2px 7px;font-family:monospace;
-}
-.search-results{max-height:420px;overflow-y:auto;padding:8px}
-.search-result-item{
-  display:flex;align-items:center;gap:12px;
-  padding:10px 12px;border-radius:9px;cursor:pointer;
-  transition:background 0.1s;
-}
-.search-result-item:hover,.search-result-item.selected{background:rgba(108,99,255,0.12)}
-.sr-icon{
-  width:36px;height:36px;border-radius:9px;
-  display:flex;align-items:center;justify-content:center;
-  font-size:16px;flex-shrink:0;
-  background:var(--surface2);
-}
-.sr-info{flex:1;min-width:0}
-.sr-title{font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.sr-title mark{background:rgba(108,99,255,0.25);color:var(--accent2);border-radius:2px;padding:0 1px}
-.sr-path{font-size:11px;color:var(--text3);margin-top:2px}
-.sr-badge{
-  font-size:10px;font-weight:700;color:var(--text3);
-  background:var(--surface2);border:1px solid var(--border2);
-  border-radius:5px;padding:2px 7px;white-space:nowrap;flex-shrink:0;
-}
-.search-empty{text-align:center;padding:32px;color:var(--text3);font-size:14px}
-.search-hint-bar{
-  padding:10px 18px;border-top:1px solid var(--border);
-  display:flex;gap:16px;font-size:11px;color:var(--text3);
-}
-.search-hint-bar span{display:flex;align-items:center;gap:5px}
-.search-hint-bar kbd{
-  background:var(--surface2);border:1px solid var(--border2);
-  border-radius:4px;padding:1px 6px;font-family:monospace;font-size:11px;
-}
-
-/* ════════════════════════════════════
-   PROGRESS — checkmark on lecture cards
-════════════════════════════════════ */
-.lec-card.done{border-color:rgba(16,185,129,0.3)}
-.lec-card.done .lec-thumb{background:linear-gradient(135deg,#064e3b,#065f46)}
-.done-check{
-  position:absolute;top:4px;right:4px;
-  width:18px;height:18px;border-radius:50%;
-  background:var(--green);
-  display:flex;align-items:center;justify-content:center;
-  font-size:9px;color:#fff;font-weight:900;
-}
-.btn-done{
-  display:flex;align-items:center;gap:5px;
-  background:var(--surface2);border:1px solid var(--border2);
-  border-radius:7px;padding:7px 12px;
-  font-size:12px;font-weight:600;color:var(--text2);
-  cursor:pointer;transition:all 0.15s;
-  font-family:'Plus Jakarta Sans',sans-serif;
-}
-.btn-done:hover{border-color:var(--green);color:var(--green)}
-.btn-done.marked{background:rgba(16,185,129,0.1);border-color:var(--green);color:var(--green)}
-
-/* ════════════════════════════════════
-   STATS DASHBOARD (subjects page header)
-════════════════════════════════════ */
-.stats-bar{
-  display:flex;gap:12px;flex-wrap:wrap;
-  margin-bottom:22px;
-}
-.stat-pill{
-  display:flex;align-items:center;gap:10px;
-  background:var(--surface);border:1px solid var(--border2);
-  border-radius:12px;padding:12px 16px;
-  flex:1;min-width:140px;
-}
-.stat-pill-icon{
-  width:38px;height:38px;border-radius:10px;
-  display:flex;align-items:center;justify-content:center;
-  font-size:18px;flex-shrink:0;
-}
-.stat-pill-info{}
-.stat-pill-val{font-size:20px;font-weight:800;line-height:1}
-.stat-pill-label{font-size:11px;color:var(--text2);margin-top:2px}
-
-/* subject card progress badge */
-.subject-done-badge{
-  position:absolute;top:12px;right:12px;
-  font-size:10px;font-weight:700;
-  background:rgba(16,185,129,0.15);border:1px solid rgba(16,185,129,0.3);
-  color:var(--green);border-radius:20px;padding:2px 8px;
-}
-
-/* ════════════════════════════════════
-   SEARCH BUTTON IN TOPBAR
-════════════════════════════════════ */
-.search-btn{
-  display:flex;align-items:center;gap:7px;
-  background:var(--surface2);border:1px solid var(--border2);
-  border-radius:8px;padding:6px 12px;
-  font-size:12.5px;color:var(--text2);
-  cursor:pointer;transition:all 0.15s;
-  font-family:'Plus Jakarta Sans',sans-serif;
-}
-.search-btn:hover{border-color:var(--accent);color:var(--accent2)}
-
-/* ════════════════════════════════════
-   KEYBOARD SHORTCUT HINT
-════════════════════════════════════ */
-.kbd-hint{
-  position:fixed;bottom:24px;left:50%;transform:translateX(-50%);
-  background:var(--surface);border:1px solid var(--border2);
-  border-radius:10px;padding:10px 16px;
-  font-size:11.5px;color:var(--text2);
-  box-shadow:var(--shadow-lg);z-index:600;
-  display:flex;gap:16px;align-items:center;
-  animation:fadeUp 0.3s ease;
-}
-.kbd-hint kbd{
-  background:var(--surface2);border:1px solid var(--border2);
-  border-radius:4px;padding:1px 7px;
-  font-family:monospace;font-size:11px;color:var(--text);
-}
-.kbd-hint-close{
-  cursor:pointer;color:var(--text3);font-size:14px;margin-left:4px;
-}
-.kbd-hint-close:hover{color:var(--text)}
 </style>
 </head>
 <body>
@@ -727,7 +573,7 @@ body{font-family:'Plus Jakarta Sans',sans-serif;background:var(--bg);color:var(-
 
     <!-- Google Sign-In button -->
     <div id="g_id_onload"
-      data-client_id="YOUR_GOOGLE_CLIENT_ID"
+      data-client_id="95995988857-iuveiiq9s0cv1gtch9dn618k9fuu835a.apps.googleusercontent.com"
       data-callback="handleGoogleLogin"
       data-auto_prompt="false">
     </div>
@@ -799,7 +645,6 @@ body{font-family:'Plus Jakarta Sans',sans-serif;background:var(--bg);color:var(-
       <span class="active">Parakram GATE 2026</span>
     </div>
     <div class="topbar-right">
-      <button class="search-btn" onclick="openSearch()">🔍 <span>Search</span> <span style="font-size:10px;opacity:0.6">Ctrl+K</span></button>
       <div class="user-pill">
         <div class="user-av" id="userAv2">K</div>
         <span class="user-name" id="userName2">Kautilya</span>
@@ -810,7 +655,6 @@ body{font-family:'Plus Jakarta Sans',sans-serif;background:var(--bg);color:var(-
   <div class="subjects-body">
     <div class="page-heading" style="margin-bottom:4px">Parakram GATE 2026</div>
     <div class="page-sub" style="margin-bottom:20px">Choose a subject to start studying</div>
-    <div class="stats-bar" id="statsBar"></div>
     <div class="subjects-grid" id="subjectsGrid"></div>
   </div>
 </div>
@@ -831,7 +675,6 @@ body{font-family:'Plus Jakarta Sans',sans-serif;background:var(--bg);color:var(-
       <span class="active" id="lecPageSubject">COA</span>
     </div>
     <div class="topbar-right">
-      <button class="search-btn" onclick="openSearch()">🔍 <span style="font-size:10px;opacity:0.6">Ctrl+K</span></button>
       <div class="user-pill">
         <div class="user-av" id="userAv3">K</div>
         <span class="user-name" id="userName3">Kautilya</span>
@@ -913,25 +756,6 @@ body{font-family:'Plus Jakarta Sans',sans-serif;background:var(--bg);color:var(-
   </div>
 </div>
 
-<!-- SEARCH OVERLAY -->
-<div id="searchOverlay" onclick="handleSearchOverlayClick(event)">
-  <div class="search-box">
-    <div class="search-input-row">
-      <span class="s-icon">🔍</span>
-      <input type="text" id="searchInput" placeholder="Search lectures, chapters, subjects…" oninput="renderSearchResults()" onkeydown="handleSearchKey(event)" autocomplete="off"/>
-      <span class="search-kbd">ESC</span>
-    </div>
-    <div class="search-results" id="searchResults">
-      <div class="search-empty">Start typing to search across all 19 subjects…</div>
-    </div>
-    <div class="search-hint-bar">
-      <span><kbd>↑</kbd><kbd>↓</kbd> Navigate</span>
-      <span><kbd>Enter</kbd> Open</span>
-      <span><kbd>ESC</kbd> Close</span>
-    </div>
-  </div>
-</div>
-
 <!-- ATTACHMENT MODAL -->
 <div class="modal-overlay" id="modalOverlay" onclick="handleOverlayClick(event)">
   <div class="modal" id="modalBox">
@@ -950,12 +774,9 @@ body{font-family:'Plus Jakarta Sans',sans-serif;background:var(--bg);color:var(-
 // ════════════════════════════════════
 // CONFIG — replace with your Client ID
 // ════════════════════════════════════
-const GOOGLE_CLIENT_ID = "YOUR_GOOGLE_CLIENT_ID";
+const GOOGLE_CLIENT_ID = "95995988857-iuveiiq9s0cv1gtch9dn618k9fuu835a.apps.googleusercontent.com";
 // Whitelist: only these emails can log in
-const ALLOWED_EMAILS = [
-  // Add your email here e.g: "kautilya@gmail.com"
-  // Leave empty [] to allow ANY Google account
-];
+const ALLOWED_EMAILS = ["kautilya.2355@gmail.com"];
 
 // ════════════════════════════════════
 // DRIVE HELPERS
@@ -2218,257 +2039,6 @@ let currentLecture = null;
 let currentChapter = null;
 
 // ════════════════════════════════════
-// PROGRESS (localStorage)
-// ════════════════════════════════════
-const PROGRESS_KEY = 'parakram_progress';
-
-function loadProgress() {
-  try { return JSON.parse(localStorage.getItem(PROGRESS_KEY)) || {}; }
-  catch(e) { return {}; }
-}
-function saveProgress(p) {
-  try { localStorage.setItem(PROGRESS_KEY, JSON.stringify(p)); } catch(e) {}
-}
-function getLectureKey(subId, chIdx, lecNum) {
-  return `${subId}__${chIdx}__${lecNum}`;
-}
-function isLectureDone(subId, chIdx, lecNum) {
-  return !!loadProgress()[getLectureKey(subId, chIdx, lecNum)];
-}
-function toggleLectureDone(subId, chIdx, lecNum) {
-  const p = loadProgress();
-  const k = getLectureKey(subId, chIdx, lecNum);
-  if (p[k]) { delete p[k]; } else { p[k] = 1; }
-  saveProgress(p);
-  renderLectures();
-  renderChapters();
-  renderStatsBar();
-}
-function getTotalLectures() {
-  let t = 0;
-  SUBJECTS.forEach(s => s.chapters.forEach(ch => { t += ch.lectures.length; }));
-  return t;
-}
-function getDoneLectures() {
-  const p = loadProgress();
-  return Object.keys(p).length;
-}
-function getSubjectProgress(subId) {
-  const sub = SUBJECTS.find(s => s.id === subId);
-  if (!sub) return {done:0,total:0};
-  let total = 0, done = 0;
-  sub.chapters.forEach((ch, ci) => {
-    ch.lectures.forEach(lec => {
-      total++;
-      if (isLectureDone(subId, ci, lec.num)) done++;
-    });
-  });
-  return {done, total};
-}
-
-// ════════════════════════════════════
-// STATS BAR
-// ════════════════════════════════════
-function renderStatsBar() {
-  const total = getTotalLectures();
-  const done  = getDoneLectures();
-  const pct   = total > 0 ? Math.round((done/total)*100) : 0;
-  const activeSubjects = SUBJECTS.filter(s => getSubjectProgress(s.id).done > 0).length;
-  const el = document.getElementById('statsBar');
-  if (!el) return;
-  el.innerHTML = `
-    <div class="stat-pill">
-      <div class="stat-pill-icon" style="background:rgba(108,99,255,0.12)">📹</div>
-      <div class="stat-pill-info">
-        <div class="stat-pill-val">${done}<span style="font-size:13px;color:var(--text2);font-weight:500"> / ${total}</span></div>
-        <div class="stat-pill-label">Lectures Completed</div>
-      </div>
-    </div>
-    <div class="stat-pill">
-      <div class="stat-pill-icon" style="background:rgba(16,185,129,0.12)">🏆</div>
-      <div class="stat-pill-info">
-        <div class="stat-pill-val">${pct}%</div>
-        <div class="stat-pill-label">Overall Progress</div>
-      </div>
-    </div>
-    <div class="stat-pill">
-      <div class="stat-pill-icon" style="background:rgba(245,158,11,0.12)">📚</div>
-      <div class="stat-pill-info">
-        <div class="stat-pill-val">${activeSubjects}<span style="font-size:13px;color:var(--text2);font-weight:500"> / 19</span></div>
-        <div class="stat-pill-label">Subjects Started</div>
-      </div>
-    </div>
-    <div class="stat-pill">
-      <div class="stat-pill-icon" style="background:rgba(59,130,246,0.12)">🎯</div>
-      <div class="stat-pill-info">
-        <div class="stat-pill-val">${total - done}</div>
-        <div class="stat-pill-label">Lectures Remaining</div>
-      </div>
-    </div>
-  `;
-}
-
-// ════════════════════════════════════
-// SEARCH
-// ════════════════════════════════════
-let searchSelectedIdx = -1;
-let searchResults = [];
-
-function openSearch() {
-  document.getElementById('searchOverlay').classList.add('open');
-  setTimeout(() => document.getElementById('searchInput').focus(), 50);
-  searchSelectedIdx = -1;
-  renderSearchResults();
-}
-function closeSearch() {
-  document.getElementById('searchOverlay').classList.remove('open');
-  document.getElementById('searchInput').value = '';
-  searchResults = [];
-  searchSelectedIdx = -1;
-}
-function handleSearchOverlayClick(e) {
-  if (e.target === document.getElementById('searchOverlay')) closeSearch();
-}
-function buildSearchIndex() {
-  const idx = [];
-  SUBJECTS.forEach(sub => {
-    sub.chapters.forEach((ch, ci) => {
-      ch.lectures.forEach(lec => {
-        idx.push({
-          subId: sub.id,
-          subName: sub.name,
-          subIcon: sub.icon,
-          chIdx: ci,
-          chCode: ch.code,
-          chName: ch.name,
-          lecNum: lec.num,
-          title: lec.title,
-          fullTitle: `${ch.name} ${String(lec.num).padStart(2,'0')} : ${lec.title}`,
-        });
-      });
-    });
-  });
-  return idx;
-}
-function highlightMatch(text, query) {
-  if (!query) return text;
-  const re = new RegExp(`(${query.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')})`, 'gi');
-  return text.replace(re, '<mark>$1</mark>');
-}
-function renderSearchResults() {
-  const q = document.getElementById('searchInput').value.trim().toLowerCase();
-  const el = document.getElementById('searchResults');
-  if (!q) {
-    el.innerHTML = '<div class="search-empty">Start typing to search across all 19 subjects…</div>';
-    searchResults = [];
-    return;
-  }
-  const idx = buildSearchIndex();
-  searchResults = idx.filter(r =>
-    r.title.toLowerCase().includes(q) ||
-    r.chName.toLowerCase().includes(q) ||
-    r.subName.toLowerCase().includes(q)
-  ).slice(0, 12);
-  if (!searchResults.length) {
-    el.innerHTML = '<div class="search-empty">No results found for "<strong>' + q + '</strong>"</div>';
-    return;
-  }
-  el.innerHTML = searchResults.map((r, i) => `
-    <div class="search-result-item ${i === searchSelectedIdx ? 'selected' : ''}"
-         onclick="jumpToLecture(${i})"
-         onmouseover="searchSelectedIdx=${i};renderSearchResultsHighlight()">
-      <div class="sr-icon">${r.subIcon}</div>
-      <div class="sr-info">
-        <div class="sr-title">${highlightMatch(r.fullTitle, document.getElementById('searchInput').value.trim())}</div>
-        <div class="sr-path">${r.subName} · ${r.chCode}</div>
-      </div>
-      <span class="sr-badge">${r.chCode}</span>
-    </div>
-  `).join('');
-}
-function renderSearchResultsHighlight() {
-  document.querySelectorAll('.search-result-item').forEach((el, i) => {
-    el.classList.toggle('selected', i === searchSelectedIdx);
-  });
-}
-function handleSearchKey(e) {
-  if (e.key === 'Escape') { closeSearch(); return; }
-  if (e.key === 'ArrowDown') {
-    e.preventDefault();
-    searchSelectedIdx = Math.min(searchSelectedIdx + 1, searchResults.length - 1);
-    renderSearchResultsHighlight();
-    document.querySelectorAll('.search-result-item')[searchSelectedIdx]?.scrollIntoView({block:'nearest'});
-  } else if (e.key === 'ArrowUp') {
-    e.preventDefault();
-    searchSelectedIdx = Math.max(searchSelectedIdx - 1, 0);
-    renderSearchResultsHighlight();
-    document.querySelectorAll('.search-result-item')[searchSelectedIdx]?.scrollIntoView({block:'nearest'});
-  } else if (e.key === 'Enter') {
-    if (searchSelectedIdx >= 0 && searchResults[searchSelectedIdx]) jumpToLecture(searchSelectedIdx);
-  }
-}
-function jumpToLecture(idx) {
-  const r = searchResults[idx];
-  if (!r) return;
-  closeSearch();
-  activeSubjectId  = r.subId;
-  activeChapterIdx = r.chIdx;
-  activeTab = 'all';
-  document.getElementById('lecPageSubject').textContent = SUBJECTS.find(s=>s.id===r.subId)?.short || r.subId.toUpperCase();
-  goTo('lectures');
-  setTimeout(() => {
-    openPlayer(r.subId, r.chIdx, r.lecNum);
-  }, 80);
-}
-
-// ════════════════════════════════════
-// KEYBOARD SHORTCUTS
-// ════════════════════════════════════
-function initKeyboardShortcuts() {
-  document.addEventListener('keydown', e => {
-    const active = document.querySelector('.page.active')?.id;
-    // Ctrl+K or Cmd+K → open search
-    if ((e.ctrlKey || e.metaKey) && e.key === 'k') {
-      e.preventDefault();
-      openSearch();
-      return;
-    }
-    // ESC → close search / modal, or go back
-    if (e.key === 'Escape') {
-      if (document.getElementById('searchOverlay').classList.contains('open')) { closeSearch(); return; }
-      if (document.getElementById('modalOverlay').classList.contains('open')) { closeModal(); return; }
-    }
-    // Arrow navigation in player page
-    if (active === 'playerPage' && !document.getElementById('searchOverlay').classList.contains('open')) {
-      if (e.key === 'ArrowRight' || e.key === 'ArrowDown') { e.preventDefault(); navLecture(1); }
-      if (e.key === 'ArrowLeft'  || e.key === 'ArrowUp')   { e.preventDefault(); navLecture(-1); }
-    }
-    // Arrow navigation in lectures page
-    if (active === 'lecturesPage' && !document.getElementById('searchOverlay').classList.contains('open')) {
-      if (e.key === 'ArrowRight') { e.preventDefault(); navChapter(1); }
-      if (e.key === 'ArrowLeft')  { e.preventDefault(); navChapter(-1); }
-    }
-  });
-}
-function navLecture(dir) {
-  if (!currentChapter || !currentLecture) return;
-  const lecs = currentChapter.lectures;
-  const idx  = lecs.findIndex(l => l.num === currentLecture.num);
-  const next = lecs[idx + dir];
-  if (next) { openPlayer(activeSubjectId, activeChapterIdx, next.num); showToast(`Lecture ${next.num}: ${next.title}`); }
-  else { showToast(dir > 0 ? '✅ Last lecture in chapter' : '⬆️ Already at first lecture'); }
-}
-function navChapter(dir) {
-  const sub = SUBJECTS.find(s => s.id === activeSubjectId);
-  if (!sub) return;
-  const next = activeChapterIdx + dir;
-  if (next >= 0 && next < sub.chapters.length) {
-    selectChapter(next);
-    showToast(`${sub.chapters[next].code} — ${sub.chapters[next].name}`);
-  }
-}
-
-// ════════════════════════════════════
 // AUTH
 // ════════════════════════════════════
 function handleGoogleLogin(response) {
@@ -2540,9 +2110,6 @@ function goTo(page) {
 // BATCHES PAGE
 // ════════════════════════════════════
 function renderBatches() {
-  const total = getTotalLectures();
-  const done  = getDoneLectures();
-  const pct   = total > 0 ? Math.round((done/total)*100) : 0;
   document.getElementById('batchGrid').innerHTML = `
     <div class="batch-card" onclick="openBatch()">
       <div class="batch-card-banner">
@@ -2554,14 +2121,14 @@ function renderBatches() {
         <div class="batch-meta">CS & IT · Full Course · 19 Subjects</div>
         <div class="batch-stats">
           <div class="batch-stat">📚 <strong>19</strong> Subjects</div>
-          <div class="batch-stat">📹 <strong>${total}</strong> Lectures</div>
-          <div class="batch-stat">✅ <strong>${done}</strong> Done</div>
+          <div class="batch-stat">📹 <strong>150+</strong> Lectures</div>
+          <div class="batch-stat">📋 <strong>50+</strong> DPPs</div>
         </div>
       </div>
       <div class="batch-card-footer">
         <div>
-          <div class="batch-progress-label">Overall Progress — ${pct}%</div>
-          <div class="batch-progress-bar"><div class="batch-progress-fill" style="width:${pct}%"></div></div>
+          <div class="batch-progress-label">Overall Progress</div>
+          <div class="batch-progress-bar"><div class="batch-progress-fill" style="width:8%"></div></div>
         </div>
         <button class="btn-enter">Open →</button>
       </div>
@@ -2575,23 +2142,18 @@ function openBatch() { goTo('subjects'); }
 // SUBJECTS PAGE
 // ════════════════════════════════════
 function renderSubjects() {
-  renderStatsBar();
-  document.getElementById('subjectsGrid').innerHTML = SUBJECTS.map(s => {
-    const prog = getSubjectProgress(s.id);
-    const pct  = prog.total > 0 ? Math.round((prog.done/prog.total)*100) : 0;
-    return `
+  document.getElementById('subjectsGrid').innerHTML = SUBJECTS.map(s => `
     <div class="subject-card ${s.color}" onclick="openSubject('${s.id}')">
       <div class="subject-icon">${s.icon}</div>
-      ${prog.done > 0 ? `<span class="subject-done-badge">${pct}%</span>` : ''}
       <div>
         <div class="subject-name">${s.name}</div>
-        <div class="subject-meta">${s.chapters.length > 0 ? prog.done + '/' + prog.total + ' done · ' + s.chapters.length + ' chapters' : 'Coming soon'}</div>
+        <div class="subject-meta">${s.chapters.length > 0 ? s.chapters.length + ' chapters' : 'Coming soon'}</div>
       </div>
       <div class="subject-progress">
-        <div class="subject-progress-fill" style="width:${pct}%"></div>
+        <div class="subject-progress-fill" style="width:${s.chapters.length > 0 ? Math.floor(Math.random()*30) : 0}%"></div>
       </div>
-    </div>`;
-  }).join('');
+    </div>
+  `).join('');
 }
 
 function openSubject(id) {
@@ -2616,18 +2178,12 @@ function renderLecturesPage() {
 function renderChapters() {
   const sub = SUBJECTS.find(s => s.id === activeSubjectId);
   if (!sub) return;
-  document.getElementById('chapterList').innerHTML = sub.chapters.map((ch, i) => {
-    const done  = ch.lectures.filter(l => isLectureDone(activeSubjectId, i, l.num)).length;
-    const total = ch.lectures.length;
-    const pct   = total > 0 ? Math.round((done/total)*100) : 0;
-    return `
+  document.getElementById('chapterList').innerHTML = sub.chapters.map((ch, i) => `
     <div class="ch-item ${i === activeChapterIdx ? 'active' : ''}" onclick="selectChapter(${i})">
       <span class="ch-badge">${ch.code}</span>
-      <span class="ch-label">${ch.name}
-        ${done > 0 ? `<span style="font-size:10px;color:var(--green);font-weight:700;margin-left:4px">${done}/${total}</span>` : ''}
-      </span>
-    </div>`;
-  }).join('');
+      <span class="ch-label">${ch.name}</span>
+    </div>
+  `).join('');
 }
 
 function selectChapter(idx) {
@@ -2684,17 +2240,14 @@ function renderLectures() {
   }
 
   // All / Videos
-  list.innerHTML = ch.lectures.map(lec => {
-    const done = isLectureDone(activeSubjectId, activeChapterIdx, lec.num);
-    return `
-    <div class="lec-card ${done ? 'done' : ''}">
+  list.innerHTML = ch.lectures.map(lec => `
+    <div class="lec-card">
       <div class="lec-card-main">
         <div class="lec-thumb" onclick="openPlayer('${activeSubjectId}',${activeChapterIdx},${lec.num})">
           <div class="lec-num">${String(lec.num).padStart(2,'0')}</div>
           <div class="play-circle">
             <svg width="10" height="10" viewBox="0 0 24 24" fill="#6c63ff"><polygon points="5 3 19 12 5 21 5 3"/></svg>
           </div>
-          ${done ? '<div class="done-check">✓</div>' : ''}
         </div>
         <div class="lec-info">
           <div class="lec-meta">LECTURE <span>${lec.num}</span></div>
@@ -2707,14 +2260,11 @@ function renderLectures() {
               📎 Attachments
               <span class="attach-num">${ch.dppPdfs.length + ch.dppVideos.length + 1}</span>
             </button>
-            <button class="btn-done ${done ? 'marked' : ''}" onclick="toggleLectureDone('${activeSubjectId}',${activeChapterIdx},${lec.num})">
-              ${done ? '✅ Done' : '☐ Mark Done'}
-            </button>
           </div>
         </div>
       </div>
-    </div>`;
-  }).join('');
+    </div>
+  `).join('');
 }
 
 // ════════════════════════════════════
@@ -2803,17 +2353,14 @@ function renderPlayerRight() {
     // Playlist — all lectures in this chapter
     body.innerHTML = `
       <div class="pr-section-title">${ch.code} · ${ch.lectures.length} Lectures</div>
-      ${ch.lectures.map(l => {
-        const done = isLectureDone(activeSubjectId, activeChapterIdx, l.num);
-        const isNow = l.num === lec.num;
-        return `
-        <div class="pr-item" style="${isNow ? 'border-color:var(--accent);background:rgba(108,99,255,0.08)' : ''}"
+      ${ch.lectures.map(l => `
+        <div class="pr-item ${l.num === lec.num ? 'style="border-color:var(--accent);background:rgba(108,99,255,0.08)"' : ''}"
              onclick="openPlayer('${activeSubjectId}',${activeChapterIdx},${l.num})">
-          <div class="pr-item-icon">${done ? '✅' : (isNow ? '▶️' : '⏸️')}</div>
+          <div class="pr-item-icon">${l.num === lec.num ? '▶️' : '⏸️'}</div>
           <div class="pr-item-name">${String(l.num).padStart(2,'0')}. ${l.title}</div>
-          ${isNow ? '<span class="pr-item-action" style="color:var(--accent2)">Now</span>' : ''}
-        </div>`;
-      }).join('')}
+          ${l.num === lec.num ? '<span class="pr-item-action" style="color:var(--accent2)">Now</span>' : ''}
+        </div>
+      `).join('')}
     `;
   }
 }
@@ -2922,7 +2469,6 @@ window.onload = () => {
   if (GOOGLE_CLIENT_ID !== "YOUR_GOOGLE_CLIENT_ID" && typeof google !== 'undefined') {
     google.accounts.id.initialize({ client_id: GOOGLE_CLIENT_ID, callback: handleGoogleLogin });
   }
-  initKeyboardShortcuts();
 };
 </script>
 </body>
