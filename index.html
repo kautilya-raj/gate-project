@@ -787,18 +787,11 @@ body{font-family:'Plus Jakarta Sans',sans-serif;background:var(--bg);color:var(-
           <div class="vp-spin"></div>
           <div class="vp-loading-text">Loading video…</div>
         </div>
-        <!-- Native HTML5 video (used when Drive OAuth token available) -->
-        <video id="videoEl"
-          controls
-          playsinline
-          preload="metadata"
-          style="display:none;width:100%;height:100%;object-fit:contain;background:#000"
-        ></video>
-        <!-- Drive iframe fallback (used when no token) -->
+        <!-- Drive iframe preview -->
         <iframe id="videoFrame"
           allowfullscreen
           allow="autoplay; fullscreen"
-          style="width:100%;height:100%;border:none;opacity:0;transition:opacity 0.3s"
+          style="width:100%;height:100%;border:none;opacity:0;transition:opacity 0.4s"
           onload="vpOnLoad()"
         ></iframe>
         <!-- Toolbar overlay at top of video -->
@@ -869,92 +862,18 @@ const driveDownload = id => `https://drive.google.com/uc?export=download&id=${id
 const driveEmbed    = id => `https://drive.google.com/file/d/${id}/preview`;
 
 // ════════════════════════════════════
-// OAUTH ACCESS TOKEN (for Drive API streaming)
+// VIDEO PLAYER — Drive iframe preview
 // ════════════════════════════════════
-let gAccessToken  = null;
-let gTokenClient  = null;
 let vpCurrentDriveId = null;
-let vpPendingFileId  = null;   // queued while waiting for token
 
-function initTokenClient() {
-  if (!window.google?.accounts?.oauth2) return;
-  gTokenClient = google.accounts.oauth2.initTokenClient({
-    client_id: GOOGLE_CLIENT_ID,
-    scope: 'https://www.googleapis.com/auth/drive.readonly',
-    callback: (resp) => {
-      if (resp.error) { console.error('Token error:', resp); return; }
-      gAccessToken = resp.access_token;
-      // If a video was waiting for the token, load it now
-      if (vpPendingFileId) { const id = vpPendingFileId; vpPendingFileId = null; vpLoad(id); }
-    },
-  });
-}
-
-function requestAccessToken(onGranted) {
-  // If we already have a token, use it immediately
-  if (gAccessToken) { onGranted(); return; }
-  vpPendingFileId = vpCurrentDriveId;
-  if (gTokenClient) {
-    gTokenClient.requestAccessToken({ prompt: '' });
-  } else {
-    // Fallback — no token client available
-    onGranted();
-  }
-}
-
-// ════════════════════════════════════
-// VIDEO PLAYER
-// ════════════════════════════════════
 function vpLoad(fileId) {
   vpCurrentDriveId = fileId;
-  const loading = document.getElementById('vpLoading');
-  const videoEl = document.getElementById('videoEl');
   const iframe  = document.getElementById('videoFrame');
-
-  if (loading) loading.classList.remove('hidden');
-
-  if (gAccessToken && videoEl) {
-    // ── MODE 1: Native HTML5 streaming via Drive API ──
-    // Hide iframe, show video element
-    if (iframe)  { iframe.style.display = 'none'; }
-    if (videoEl) { videoEl.style.display = 'block'; videoEl.style.opacity = '0'; }
-
-    // Fetch authenticated stream URL from Drive API
-    fetch(`https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`, {
-      headers: { Authorization: `Bearer ${gAccessToken}` }
-    }).then(res => {
-      if (!res.ok) throw new Error('Drive API error: ' + res.status);
-      // res.url is the final redirected streamable URL
-      return res.url || res.redirected ? res.url : null;
-    }).then(streamUrl => {
-      if (!streamUrl) throw new Error('No stream URL');
-      videoEl.src = streamUrl;
-      videoEl.load();
-      videoEl.style.opacity = '1';
-      if (loading) loading.classList.add('hidden');
-    }).catch(() => {
-      // Token may have expired — refresh it then retry
-      gAccessToken = null;
-      vpFallbackIframe(fileId);
-    });
-
-  } else if (gAccessToken === null && gTokenClient) {
-    // ── Request token first, then load ──
-    vpPendingFileId = fileId;
-    gTokenClient.requestAccessToken({ prompt: '' });
-  } else {
-    // ── MODE 2: iframe fallback (no token available) ──
-    vpFallbackIframe(fileId);
-  }
-}
-
-function vpFallbackIframe(fileId) {
-  const iframe  = document.getElementById('videoFrame');
-  const videoEl = document.getElementById('videoEl');
   const loading = document.getElementById('vpLoading');
-  if (videoEl) { videoEl.style.display = 'none'; videoEl.src = ''; }
-  if (iframe)  { iframe.style.display = 'block'; iframe.style.opacity = '0'; iframe.src = driveEmbed(fileId); }
+  if (!iframe) return;
   if (loading) loading.classList.remove('hidden');
+  iframe.style.opacity = '0';
+  iframe.src = driveEmbed(fileId);
 }
 
 function vpOnLoad() {
@@ -977,9 +896,13 @@ function vpNavLecture(dir) {
     openPlayer(activeSubjectId, activeChapterIdx, next.num);
     showToast(dir > 0 ? `▶ Next: ${next.title}` : `◀ Prev: ${next.title}`);
   } else {
-    showToast(dir > 0 ? '✅ Last lecture in chapter' : '⬆️ Already at first lecture');
+    showToast(dir > 0 ? '✅ Last lecture in chapter' : '⬆️ First lecture already');
   }
 }
+
+function initTokenClient() {} // no-op, kept for compatibility
+
+
 
 // ════════════════════════════════════
 // SUBJECTS DATA
@@ -2362,10 +2285,6 @@ function handleGoogleLogin(response) {
   }
   currentUser = { name: payload.name, email, picture: payload.picture, initials: payload.name.charAt(0).toUpperCase() };
   onLoginSuccess();
-  // Silently request Drive read access right after login
-  if (gTokenClient) {
-    setTimeout(() => gTokenClient.requestAccessToken({ prompt: '' }), 600);
-  }
 }
 
 function demoLogin() {
@@ -2400,11 +2319,6 @@ function onLoginSuccess() {
 
 function logout() {
   currentUser = null;
-  gAccessToken = null;
-  if (typeof google !== 'undefined') {
-    try { google.accounts.id.disableAutoSelect(); } catch(e) {}
-    try { google.accounts.oauth2.revoke(gAccessToken, () => {}); } catch(e) {}
-  }
   goTo('login');
   showToast('👋 Logged out successfully');
 }
