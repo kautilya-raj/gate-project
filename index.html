@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
 <title>Parakram GATE 2026</title>
 <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet"/>
-<script src="https://accounts.google.com/gsi/client" async defer></script>
+<script src="https://accounts.google.com/gsi/client"></script>
 <style>
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
 
@@ -577,7 +577,12 @@ body{font-family:'Plus Jakarta Sans',sans-serif;background:var(--bg);color:var(-
       data-callback="handleGoogleLogin"
       data-auto_prompt="false">
     </div>
-    <button class="google-btn" onclick="triggerGoogleLogin()">
+
+    <!-- Google renders its own button here -->
+    <div id="googleBtnContainer" style="display:flex;justify-content:center;margin-bottom:4px"></div>
+
+    <!-- Fallback manual button in case rendered button fails -->
+    <button class="google-btn" id="googleFallbackBtn" onclick="triggerGoogleLogin()" style="display:none">
       <svg class="google-icon" viewBox="0 0 24 24">
         <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/>
         <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/>
@@ -2058,10 +2063,21 @@ function demoLogin() {
 }
 
 function triggerGoogleLogin() {
-  if (typeof google !== 'undefined') {
-    google.accounts.id.initialize({ client_id: GOOGLE_CLIENT_ID, callback: handleGoogleLogin });
-    google.accounts.id.prompt();
+  if (typeof google !== 'undefined' && google.accounts) {
+    google.accounts.id.initialize({
+      client_id: GOOGLE_CLIENT_ID,
+      callback: handleGoogleLogin,
+      ux_mode: 'popup'
+    });
+    google.accounts.id.prompt(notification => {
+      // If prompt is suppressed or fails, use renderButton approach
+      if (notification.isNotDisplayed() || notification.isSkippedMoment()) {
+        showToast('⚠️ Popup blocked — try the button below');
+        document.getElementById('googleFallbackBtn').style.display = 'flex';
+      }
+    });
   } else {
+    showToast('❌ Google script not loaded. Check your connection.');
     demoLogin();
   }
 }
@@ -2466,9 +2482,35 @@ function showToast(msg) {
 // INIT
 // ════════════════════════════════════
 window.onload = () => {
-  if (GOOGLE_CLIENT_ID !== "YOUR_GOOGLE_CLIENT_ID" && typeof google !== 'undefined') {
-    google.accounts.id.initialize({ client_id: GOOGLE_CLIENT_ID, callback: handleGoogleLogin });
-  }
+  initKeyboardShortcuts();
+  let tries = 0;
+  const initGoogle = () => {
+    if (typeof google !== 'undefined' && google.accounts) {
+      google.accounts.id.initialize({
+        client_id: GOOGLE_CLIENT_ID,
+        callback: handleGoogleLogin,
+        ux_mode: 'popup'
+      });
+      const container = document.getElementById('googleBtnContainer');
+      if (container) {
+        google.accounts.id.renderButton(container, {
+          theme: 'filled_black',
+          size: 'large',
+          width: 340,
+          text: 'continue_with',
+          shape: 'rectangular',
+          logo_alignment: 'left'
+        });
+      }
+    } else if (tries < 20) {
+      tries++;
+      setTimeout(initGoogle, 300);
+    } else {
+      const fb = document.getElementById('googleFallbackBtn');
+      if (fb) fb.style.display = 'flex';
+    }
+  };
+  initGoogle();
 };
 </script>
 </body>
