@@ -38,6 +38,14 @@ A high-performance, custom-built Learning Management System (LMS) dashboard desi
 
 ---
 
+#Project Structure
+├── index.html   # Skeleton & Page Routing
+├── style.css    # Glassmorphism UI & Responsive Layouts
+├── script.js    # Streaming Logic, Search Engine & Data Handling
+└── README.md    # Project Documentation
+
+---
+
 ## 🛠️ Technical Implementation
 
 ### Streaming Engine (`script.js`)
@@ -48,9 +56,4 @@ const STREAM_URLS = id => [
   `https://drive.usercontent.google.com/download?id=${id}&export=download&authuser=0&confirm=t`
 ];
 
----
-#Project Structure
-├── index.html   # Skeleton & Page Routing
-├── style.css    # Glassmorphism UI & Responsive Layouts
-├── script.js    # Streaming Logic, Search Engine & Data Handling
-└── README.md    # Project Documentation
+
