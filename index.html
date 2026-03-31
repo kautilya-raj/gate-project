@@ -1,0 +1,287 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Parakram GATE 2026</title>
+<link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet"/>
+<link rel="stylesheet" href="./style.css">
+</head>
+<body>
+
+<!-- ══════════════════════════════════
+     LOGIN PAGE
+══════════════════════════════════ -->
+<div id="loginPage" class="page active">
+  <div class="login-bg"></div>
+  <div class="login-grid"></div>
+  <div class="login-card">
+    <div class="login-logo">
+      <div class="login-logo-icon">PW</div>
+      <div class="login-logo-text">Parakram <span>GATE</span></div>
+    </div>
+    <div class="login-title">Welcome back,<br/>let's get studying 🎯</div>
+    <div class="login-sub">Access your GATE 2026 batch, lectures, notes and DPPs.</div>
+
+    <button class="continue-btn" onclick="login()">
+      🚀 &nbsp;Continue to Dashboard
+    </button>
+
+    <div class="login-note" style="margin-top:20px">
+      <span class="login-note-icon">📚</span>
+      <span>Parakram GATE 2026 — Full CS & IT course with video lectures, class notes and daily practice problems.</span>
+    </div>
+
+    <div class="login-footer">
+      Parakram GATE 2026 Batch &nbsp;·&nbsp; Physics Wallah
+    </div>
+  </div>
+</div>
+
+<!-- ══════════════════════════════════
+     BATCHES PAGE
+══════════════════════════════════ -->
+<div id="batchesPage" class="page">
+  <header class="topbar">
+    <div class="topbar-logo" onclick="goTo('batches')">
+      <div class="topbar-logo-icon">PW</div>
+      <div class="topbar-logo-text">Parakram <span>GATE</span></div>
+    </div>
+    <div class="topbar-right">
+      <button class="search-btn" onclick="openSearch()" title="Search (Ctrl+K)">🔍 <span class="search-btn-label">Search</span> <kbd>⌘K</kbd></button>
+      <div class="user-pill" id="userPill">
+        <div class="user-av" id="userAv">K</div>
+        <span class="user-name" id="userName">Kautilya</span>
+      </div>
+      <button class="logout-btn" onclick="logout()">Logout</button>
+    </div>
+  </header>
+  <div class="batches-body">
+    <div class="page-heading">My Batches</div>
+    <div class="page-sub">Select a batch to access lectures, notes and DPPs</div>
+    <div class="batch-grid" id="batchGrid"></div>
+  </div>
+</div>
+
+<!-- ══════════════════════════════════
+     SUBJECTS PAGE
+══════════════════════════════════ -->
+<div id="subjectsPage" class="page">
+  <header class="topbar">
+    <div class="topbar-logo" onclick="goTo('batches')">
+      <div class="topbar-logo-icon">PW</div>
+      <div class="topbar-logo-text">Parakram <span>GATE</span></div>
+    </div>
+    <div class="topbar-breadcrumb">
+      <span class="sep">/</span>
+      <span onclick="goTo('batches')" style="cursor:pointer">Batches</span>
+      <span class="sep">/</span>
+      <span class="active">Parakram GATE 2026</span>
+    </div>
+    <div class="topbar-right">
+      <button class="search-btn" onclick="openSearch()" title="Search (Ctrl+K)">🔍 <span class="search-btn-label">Search</span> <kbd>⌘K</kbd></button>
+      <div class="user-pill">
+        <div class="user-av" id="userAv2">K</div>
+        <span class="user-name" id="userName2">Kautilya</span>
+      </div>
+      <button class="logout-btn" onclick="logout()">Logout</button>
+    </div>
+  </header>
+  <div class="subjects-body">
+    <div class="page-heading" style="margin-bottom:4px">Parakram GATE 2026</div>
+    <div class="page-sub" style="margin-bottom:20px">Choose a subject to start studying</div>
+    <div class="stats-bar" id="statsBar"></div>
+    <div class="subjects-grid" id="subjectsGrid"></div>
+  </div>
+</div>
+
+<!-- ══════════════════════════════════
+     LECTURES PAGE
+══════════════════════════════════ -->
+<div id="lecturesPage" class="page">
+  <header class="topbar">
+    <div class="topbar-logo" onclick="goTo('batches')">
+      <div class="topbar-logo-icon">PW</div>
+      <div class="topbar-logo-text">Parakram <span>GATE</span></div>
+    </div>
+    <div class="topbar-breadcrumb">
+      <span class="sep">/</span>
+      <span onclick="goTo('subjects')" style="cursor:pointer">Subjects</span>
+      <span class="sep">/</span>
+      <span class="active" id="lecPageSubject">COA</span>
+    </div>
+    <div class="topbar-right">
+      <button class="search-btn" onclick="openSearch()" title="Search (Ctrl+K)">🔍 <span class="search-btn-label">Search</span> <kbd>⌘K</kbd></button>
+      <div class="user-pill">
+        <div class="user-av" id="userAv3">K</div>
+        <span class="user-name" id="userName3">Kautilya</span>
+      </div>
+      <button class="logout-btn" onclick="logout()">Logout</button>
+    </div>
+  </header>
+  <div class="lectures-body">
+    <!-- Chapter Sidebar -->
+    <div class="ch-sidebar">
+      <div class="ch-sidebar-head">All Chapters</div>
+      <div class="ch-list" id="chapterList"></div>
+    </div>
+    <!-- Lecture Main -->
+    <div class="lec-main">
+      <div class="lec-toolbar">
+        <div class="lec-chapter-title" id="activeChapterTitle">Select a chapter</div>
+        <div class="tab-bar">
+          <div class="tab active" onclick="setTab(this,'all')">All</div>
+          <div class="tab" onclick="setTab(this,'videos')">Videos</div>
+          <div class="tab" onclick="setTab(this,'notes')">Notes</div>
+          <div class="tab" onclick="setTab(this,'dpp')">DPP</div>
+        </div>
+      </div>
+      <div class="lec-scroll">
+        <div class="lec-list" id="lectureList"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ══════════════════════════════════
+     VIDEO PLAYER PAGE
+══════════════════════════════════ -->
+<div id="playerPage" class="page">
+  <header class="topbar">
+    <div class="topbar-logo" onclick="goTo('batches')">
+      <div class="topbar-logo-icon">PW</div>
+      <div class="topbar-logo-text">Parakram <span>GATE</span></div>
+    </div>
+    <div class="topbar-breadcrumb">
+      <span class="sep">/</span>
+      <span onclick="goTo('subjects')" style="cursor:pointer">Subjects</span>
+      <span class="sep">/</span>
+      <span onclick="goTo('lectures')" style="cursor:pointer" id="playerSubjectCrumb">Subject</span>
+      <span class="sep">/</span>
+      <span class="active" id="playerLectureCrumb">Lecture</span>
+    </div>
+    <div class="topbar-right">
+      <button class="search-btn" onclick="openSearch()" title="Search (Ctrl+K)">🔍 <span class="search-btn-label">Search</span> <kbd>⌘K</kbd></button>
+      <div class="user-pill">
+        <div class="user-av" id="userAv4">K</div>
+        <span class="user-name" id="userName4">Kautilya</span>
+      </div>
+      <button class="logout-btn" onclick="logout()">Logout</button>
+    </div>
+  </header>
+  <div class="player-body">
+    <!-- Video -->
+    <div class="player-left">
+      <div class="video-wrap" id="videoWrap">
+        <!-- Loading overlay -->
+        <div class="vp-loading" id="vpLoading">
+          <div class="vp-spin"></div>
+          <div class="vp-loading-text" id="vpLoadingText">Loading video…</div>
+          <div class="vp-progress-wrap" id="vpProgressWrap" style="display:none">
+            <div class="vp-progress-bar"><div class="vp-progress-fill" id="vpProgressFill"></div></div>
+            <div class="vp-progress-label" id="vpProgressLabel">Buffering…</div>
+          </div>
+        </div>
+        <!-- Error / Download-to-Play overlay -->
+        <div class="vp-error hidden" id="vpError">
+          <div class="vp-error-icon" id="vpErrorIcon">⚠️</div>
+          <div class="vp-error-title" id="vpErrorTitle">Video can't stream directly</div>
+          <div class="vp-error-sub" id="vpErrorSub">Google Drive hasn't processed this file yet, but you can still watch it.</div>
+          <div class="vp-error-actions">
+            <button class="vp-retry-btn" onclick="vpRetry()">🔄 Retry Stream</button>
+            <button class="vp-retry-btn" onclick="vpDownloadFile()" style="background:var(--green)">📥 Download Video</button>
+            <button class="vp-retry-btn outline" onclick="vpOpenDrive()">↗ Open in Drive</button>
+          </div>
+          <div class="vp-local-play">
+            <div class="vp-local-divider">Already downloaded? Play it here:</div>
+            <label class="vp-file-picker" id="vpFilePicker">
+              <input type="file" accept="video/*" onchange="vpPlayLocalFile(event)" style="display:none"/>
+              📂 Select downloaded video file
+            </label>
+          </div>
+        </div>
+        <!-- HTML5 Video (primary — direct stream) -->
+        <video id="videoPlayer"
+          controls
+          preload="auto"
+          playsinline
+          style="width:100%;height:100%;display:none;background:#000"
+        ></video>
+        <!-- Drive iframe (fallback) -->
+        <iframe id="videoFrame"
+          allowfullscreen
+          allow="autoplay; fullscreen; encrypted-media"
+          referrerpolicy="no-referrer"
+          style="width:100%;height:100%;border:none;display:none"
+          onload="vpOnIframeLoad()"
+        ></iframe>
+        <!-- Toolbar overlay at top of video -->
+        <div class="vp-toolbar" id="vpToolbar">
+          <div class="vp-toolbar-left">
+            <span class="vp-label" id="vpLabel">Lecture</span>
+            <span class="vp-mode-badge" id="vpModeBadge">DIRECT</span>
+          </div>
+          <div class="vp-toolbar-right">
+            <button class="vp-tbtn" onclick="vpOpenDrive()" title="Open in Google Drive ↗">
+              ↗ Open in Drive
+            </button>
+            <button class="vp-tbtn vp-tbtn-prev" id="vpPrevBtn" onclick="vpNavLecture(-1)" title="Previous Lecture">
+              ← Prev
+            </button>
+            <button class="vp-tbtn vp-tbtn-next" id="vpNextBtn" onclick="vpNavLecture(1)" title="Next Lecture">
+              Next →
+            </button>
+          </div>
+        </div>
+      </div>
+      <div class="player-info">
+        <div class="player-title" id="playerTitle">Loading...</div>
+        <div class="player-meta">
+          <span id="playerSubject" style="color:var(--accent2);font-weight:600"></span>
+          <span id="playerChapter"></span>
+          <span id="playerDoneTag"></span>
+        </div>
+      </div>
+    </div>
+    <!-- Side Panel -->
+    <div class="player-right">
+      <div class="player-right-tabs">
+        <div class="pr-tab active" onclick="setPrTab(this,'attachments')">📎 Attachments</div>
+        <div class="pr-tab" onclick="setPrTab(this,'playlist')">📋 Playlist</div>
+      </div>
+      <div class="player-right-body" id="playerRightBody"></div>
+    </div>
+  </div>
+</div>
+
+<!-- SEARCH OVERLAY -->
+<div class="modal-overlay" id="searchOverlay" onclick="handleSearchOverlayClick(event)">
+  <div class="search-modal">
+    <div class="search-input-wrap">
+      <span class="search-icon">🔍</span>
+      <input type="text" id="searchInput" placeholder="Search lectures, chapters, subjects…" oninput="renderSearchResults()" onkeydown="handleSearchKey(event)" autocomplete="off"/>
+      <span class="search-esc" onclick="closeSearch()">ESC</span>
+    </div>
+    <div class="search-results" id="searchResults">
+      <div class="search-empty">Start typing to search across all 19 subjects…</div>
+    </div>
+  </div>
+</div>
+
+<!-- ATTACHMENT MODAL -->
+<div class="modal-overlay" id="modalOverlay" onclick="handleOverlayClick(event)">
+  <div class="modal" id="modalBox">
+    <div class="modal-head">
+      <div>
+        <div class="modal-head-title" id="modalTitle">Attachments</div>
+        <div class="modal-head-sub" id="modalSub"></div>
+      </div>
+      <button class="modal-x" onclick="closeModal()">✕</button>
+    </div>
+    <div class="modal-body" id="modalBody"></div>
+  </div>
+</div>
+
+<script src="./script.js" defer></script> 
+</body>
+</html>

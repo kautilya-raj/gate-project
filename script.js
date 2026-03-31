@@ -1,0 +1,2200 @@
+// ════════════════════════════════════
+// CONFIG
+// ════════════════════════════════════
+
+// ════════════════════════════════════
+// DRIVE HELPERS
+// ════════════════════════════════════
+const driveView     = id => `https://drive.google.com/file/d/${id}/view`;
+const driveDownload = id => `https://drive.google.com/uc?export=download&id=${id}`;
+const driveEmbed    = id => `https://drive.google.com/file/d/${id}/preview`;
+
+// ════════════════════════════════════
+// VIDEO PLAYER — Multi-URL direct streaming
+// ════════════════════════════════════
+//
+// WHY "unable to process" happens:
+//   Google Drive's EMBED player requires transcoding. If Google hasn't
+//   transcoded the file yet, the iframe shows "unable to process."
+//   But the RAW file is always available for download.
+//
+// SOLUTION:
+//   Feed the raw download URL into <video src="...">. The browser's
+//   native player handles most formats instantly — no transcoding needed.
+//   We try 5 different Google endpoints. At least one serves raw bytes.
+//
+// WHY NOT fetch-to-blob:
+//   Google Drive does NOT send CORS headers (Access-Control-Allow-Origin).
+//   So fetch() always fails from any non-Google page. <video src> works
+//   because media elements don't require CORS for basic playback.
+
+// URLs ordered by reliability — each serves the same file via different CDN paths
+const STREAM_URLS = id => [
+  // 1. Google's media CDN — serves files directly, no virus-scan page
+  `https://lh3.googleusercontent.com/d/${id}`,
+  // 2. New usercontent domain with virus-scan bypass
+  `https://drive.usercontent.google.com/download?id=${id}&export=download&authuser=0&confirm=t`,
+  // 3. Classic download URL with confirm bypass
+  `https://drive.google.com/uc?export=download&id=${id}&confirm=t`,
+  // 4. View export — different serving path
+  `https://drive.google.com/uc?export=view&id=${id}`,
+  // 5. Alternate usercontent path
+  `https://drive.usercontent.google.com/u/0/uc?id=${id}&export=download&confirm=t`,
+];
+
+let vpCurrentDriveId = null;
+let vpCurrentMode    = null;
+let vpLoadTimer      = null;
+let vpUrlIndex       = 0;
+let vpGotData        = false;  // true once any video bytes arrive
+let vpBufferedSecs   = 0;     // how many seconds are buffered
+
+const VP_CONNECT_TIMEOUT = 12000;  // 12s to get first response
+const VP_STALL_TIMEOUT   = 20000;  // 20s if data was flowing then stopped
+const VP_IFRAME_TIMEOUT  = 15000;  // 15s for iframe fallback
+
+// ─────────────────────────────────────────────────────────────
+// MAIN ENTRY
+// ─────────────────────────────────────────────────────────────
+function vpLoad(fileId) {
+  vpCleanup();
+  vpCurrentDriveId = fileId;
+  vpUrlIndex = 0;
+  vpShowLoading('Preparing video…');
+  vpTryNextUrl(fileId);
+}
+
+// ─────────────────────────────────────────────────────────────
+// TRY EACH DIRECT URL IN SEQUENCE
+// ─────────────────────────────────────────────────────────────
+function vpTryNextUrl(fileId) {
+  const urls = STREAM_URLS(fileId);
+
+  // All direct URLs exhausted → try iframe embed as last resort
+  if (vpUrlIndex >= urls.length) {
+    vpShowLoading('Direct streaming failed — trying embedded player…');
+    setTimeout(() => vpLoadIframe(fileId), 300);
+    return;
+  }
+
+  const url     = urls[vpUrlIndex];
+  const videoEl = document.getElementById('videoPlayer');
+  const iframe  = document.getElementById('videoFrame');
+  if (!videoEl) return;
+
+  // Show video element, hide iframe
+  iframe.style.display  = 'none';
+  iframe.src = '';
+  videoEl.style.display = 'block';
+  videoEl.pause();
+  videoEl.removeAttribute('src');
+  videoEl.load();
+
+  // Reset progress tracking for this URL
+  vpGotData = false;
+  vpBufferedSecs = 0;
+
+  const urlNum   = vpUrlIndex + 1;
+  const urlTotal = urls.length;
+  vpShowLoading(
+    vpUrlIndex === 0
+      ? 'Connecting to Google Drive…'
+      : `Trying stream ${urlNum} of ${urlTotal}…`
+  );
+  vpShowProgressBar('Connecting…');
+
+  // Set source and begin loading
+  videoEl.src = url;
+  videoEl.load();
+
+  // ── EVENT HANDLERS ──
+
+  function onCanPlay() {
+    // Verify we actually got video frames (not an HTML error page)
+    if (videoEl.videoWidth === 0 && videoEl.videoHeight === 0) {
+      // Might just need a moment — wait briefly
+      setTimeout(() => {
+        if (videoEl.videoWidth > 0 || videoEl.videoHeight > 0) {
+          onSuccess();
+        } else {
+          onFail('No video dimensions — likely got an HTML page');
+        }
+      }, 2000);
+      return;
+    }
+    onSuccess();
+  }
+
+  function onLoadedMetadata() {
+    // Valid video metadata received — this URL is working
+    vpGotData = true;
+    const dur = videoEl.duration;
+    if (dur && isFinite(dur)) {
+      vpShowLoading(`Buffering… (${Math.round(dur / 60)} min video)`);
+    } else {
+      vpShowLoading(`Buffering video… (stream ${urlNum})`);
+    }
+    // Extend timeout — metadata means the URL is valid
+    resetTimeout(VP_STALL_TIMEOUT);
+  }
+
+  function onProgress() {
+    vpGotData = true;
+    const buf = videoEl.buffered;
+    if (buf.length > 0) {
+      const end = buf.end(buf.length - 1);
+      const dur = videoEl.duration || 0;
+      vpBufferedSecs = end;
+
+      if (dur > 0 && isFinite(dur)) {
+        const pct = Math.min(100, Math.round((end / dur) * 100));
+        vpUpdateProgressBar(pct, `Buffered ${pct}% — ${Math.round(end)}s of ${Math.round(dur)}s`);
+      } else {
+        vpUpdateProgressBar(30, `${Math.round(end)}s buffered…`);
+      }
+
+      // Data is flowing — extend timeout
+      resetTimeout(VP_STALL_TIMEOUT);
+    }
+  }
+
+  function onError() {
+    onFail('Network error or blocked URL');
+  }
+
+  function onStalled() {
+    if (vpGotData) {
+      vpShowLoading(`Stream paused — waiting for data…`);
+    }
+  }
+
+  function onWaiting() {
+    vpShowLoading('Buffering… please wait');
+  }
+
+  // ── SUCCESS / FAIL ──
+
+  function onSuccess() {
+    detachAll();
+    clearTimeout(vpLoadTimer);
+    vpHideOverlays();
+    vpSetModeBadge('STREAM');
+    vpCurrentMode = 'direct';
+    videoEl.play().catch(() => {});
+    console.log(`[VP] Playing via URL ${urlNum}: ${url.substring(0, 60)}…`);
+  }
+
+  function onFail(reason) {
+    detachAll();
+    clearTimeout(vpLoadTimer);
+    console.log(`[VP] URL ${urlNum} failed: ${reason}`);
+    vpUrlIndex++;
+    vpTryNextUrl(fileId);
+  }
+
+  // ── EVENT MANAGEMENT ──
+
+  videoEl.addEventListener('canplay', onCanPlay);
+  videoEl.addEventListener('loadedmetadata', onLoadedMetadata);
+  videoEl.addEventListener('progress', onProgress);
+  videoEl.addEventListener('error', onError);
+  videoEl.addEventListener('stalled', onStalled);
+  videoEl.addEventListener('waiting', onWaiting);
+
+  function detachAll() {
+    videoEl.removeEventListener('canplay', onCanPlay);
+    videoEl.removeEventListener('loadedmetadata', onLoadedMetadata);
+    videoEl.removeEventListener('progress', onProgress);
+    videoEl.removeEventListener('error', onError);
+    videoEl.removeEventListener('stalled', onStalled);
+    videoEl.removeEventListener('waiting', onWaiting);
+  }
+
+  // ── SMART TIMEOUT ──
+  // If data is flowing, don't give up — extend the timeout.
+  // If we've buffered >5 seconds, just start playing anyway.
+
+  function resetTimeout(ms) {
+    clearTimeout(vpLoadTimer);
+    vpLoadTimer = setTimeout(() => {
+      if (vpGotData && vpBufferedSecs > 5) {
+        // We have enough buffer to start playing
+        onSuccess();
+      } else if (vpGotData) {
+        // Some data came but not enough — give extra time
+        vpShowLoading('Almost ready… loading a bit more');
+        vpLoadTimer = setTimeout(() => {
+          if (vpBufferedSecs > 3) {
+            onSuccess(); // play whatever we have
+          } else {
+            onFail('Stalled after partial data');
+          }
+        }, 15000);
+      } else {
+        // No data at all — this URL doesn't work
+        onFail('Timeout — no data received');
+      }
+    }, ms);
+  }
+
+  resetTimeout(VP_CONNECT_TIMEOUT);
+}
+
+// ─────────────────────────────────────────────────────────────
+// FALLBACK — Skip iframe entirely, show download + local play
+// ─────────────────────────────────────────────────────────────
+// IFRAME FALLBACK (last resort)
+// ─────────────────────────────────────────────────────────────
+function vpLoadIframe(fileId) {
+  const videoEl = document.getElementById('videoPlayer');
+  const iframe  = document.getElementById('videoFrame');
+  if (!iframe) return;
+
+  vpCurrentMode = 'iframe';
+  videoEl.style.display = 'none';
+  videoEl.pause();
+  videoEl.removeAttribute('src');
+
+  iframe.style.display = 'block';
+  iframe.style.opacity = '0';
+
+  vpShowLoading('Loading Google Drive player…');
+  vpHideProgressBar();
+
+  iframe.src = driveEmbed(fileId);
+
+  vpLoadTimer = setTimeout(() => {
+    vpShowError(
+      'Video unavailable',
+      'All streaming methods failed. Try downloading the file and playing it locally, or open in Google Drive.',
+      true
+    );
+  }, VP_IFRAME_TIMEOUT);
+}
+
+function vpTryIframe() {
+  if (vpCurrentDriveId) {
+    vpCleanup();
+    vpShowLoading('Switching to embedded player…');
+    setTimeout(() => vpLoadIframe(vpCurrentDriveId), 200);
+  }
+}
+
+function vpOnIframeLoad() {
+  clearTimeout(vpLoadTimer);
+  const iframe  = document.getElementById('videoFrame');
+  const loading = document.getElementById('vpLoading');
+  const errorEl = document.getElementById('vpError');
+  if (iframe)  iframe.style.opacity = '1';
+  if (loading) loading.classList.add('hidden');
+  if (errorEl) errorEl.classList.add('hidden');
+  vpSetModeBadge('EMBED');
+}
+
+// ─────────────────────────────────────────────────────────────
+// UI HELPERS
+// ─────────────────────────────────────────────────────────────
+function vpCleanup() {
+  clearTimeout(vpLoadTimer);
+  vpGotData = false;
+  vpBufferedSecs = 0;
+  const videoEl = document.getElementById('videoPlayer');
+  if (videoEl) { videoEl.pause(); videoEl.removeAttribute('src'); videoEl.load(); }
+  const iframe = document.getElementById('videoFrame');
+  if (iframe) iframe.src = '';
+  vpHideProgressBar();
+}
+
+function vpShowLoading(msg) {
+  const loading  = document.getElementById('vpLoading');
+  const loadText = document.getElementById('vpLoadingText');
+  const errorEl  = document.getElementById('vpError');
+  if (loading)  loading.classList.remove('hidden');
+  if (errorEl)  errorEl.classList.add('hidden');
+  if (loadText) loadText.textContent = msg || 'Loading…';
+}
+
+function vpHideOverlays() {
+  const loading = document.getElementById('vpLoading');
+  const errorEl = document.getElementById('vpError');
+  if (loading) loading.classList.add('hidden');
+  if (errorEl) errorEl.classList.add('hidden');
+  vpHideProgressBar();
+}
+
+function vpShowError(title, msg) {
+  clearTimeout(vpLoadTimer);
+  vpHideProgressBar();
+  const loading  = document.getElementById('vpLoading');
+  const errorEl  = document.getElementById('vpError');
+  const errIcon  = document.getElementById('vpErrorIcon');
+  const errTitle = document.getElementById('vpErrorTitle');
+  const errSub   = document.getElementById('vpErrorSub');
+  if (loading)  loading.classList.add('hidden');
+  if (errorEl)  errorEl.classList.remove('hidden');
+  if (errTitle) errTitle.textContent = title || 'Video failed to load';
+  if (errSub)   errSub.textContent   = msg || 'The video may be unavailable.';
+}
+
+function vpShowProgressBar(label) {
+  const wrap = document.getElementById('vpProgressWrap');
+  const fill = document.getElementById('vpProgressFill');
+  const lbl  = document.getElementById('vpProgressLabel');
+  if (wrap) wrap.style.display = 'block';
+  if (fill) fill.style.width = '0%';
+  if (lbl)  lbl.textContent = label || 'Starting…';
+}
+
+function vpUpdateProgressBar(pct, label) {
+  const fill = document.getElementById('vpProgressFill');
+  const lbl  = document.getElementById('vpProgressLabel');
+  if (fill) fill.style.width = Math.min(100, pct) + '%';
+  if (lbl)  lbl.textContent = label || '';
+}
+
+function vpHideProgressBar() {
+  const wrap = document.getElementById('vpProgressWrap');
+  if (wrap) wrap.style.display = 'none';
+}
+
+function vpSetModeBadge(text) {
+  const badge = document.getElementById('vpModeBadge');
+  if (badge) {
+    badge.textContent = text;
+    // .embed = orange, default = blue
+    badge.className = 'vp-mode-badge' + (text === 'EMBED' ? ' embed' : '');
+  }
+}
+
+function vpRetry() {
+  if (vpCurrentDriveId) vpLoad(vpCurrentDriveId);
+}
+
+function vpDownloadFile() {
+  if (!vpCurrentDriveId) return;
+  window.open(driveDownload(vpCurrentDriveId) + '&confirm=t', '_blank');
+  showToast('📥 Download started — open the file to play locally');
+}
+
+function vpOpenDrive() {
+  if (vpCurrentDriveId) window.open(driveView(vpCurrentDriveId), '_blank');
+}
+
+function vpNavLecture(dir) {
+  if (!currentChapter || !currentLecture) return;
+  const lecs = currentChapter.lectures;
+  const idx  = lecs.findIndex(l => l.num === currentLecture.num);
+  const next = lecs[idx + dir];
+  if (next) {
+    openPlayer(activeSubjectId, activeChapterIdx, next.num);
+    showToast(dir > 0 ? `▶ Next: ${next.title}` : `◀ Prev: ${next.title}`);
+  } else {
+    showToast(dir > 0 ? '✅ Last lecture in chapter' : '⬆️ First lecture already');
+  }
+}
+
+function initTokenClient() {} // no-op
+
+
+
+// ════════════════════════════════════
+// SUBJECTS DATA
+// ════════════════════════════════════
+const SUBJECTS = [
+  { id:"coa",   name:"Computer Organization & Architecture", short:"COA",   icon:"⚙️",  color:"s-purple", chapters: getCOAChapters() },
+  { id:"os",    name:"Operating Systems",                    short:"OS",    icon:"💻",  color:"s-blue",   chapters: getOSChapters() },
+  { id:"cn",    name:"Computer Networks",                    short:"CN",    icon:"🌐",  color:"s-green",  chapters: getCNChapters() },
+  { id:"ds",    name:"Data Structures & Programming",        short:"DS",    icon:"🌳",  color:"s-orange", chapters: getDSChapters() },
+  { id:"algo",  name:"Algorithms",                           short:"ALGO",  icon:"🔍",  color:"s-red",    chapters: getAlgoChapters() },
+  { id:"dbms",  name:"Database Management System",           short:"DBMS",  icon:"🗄️",  color:"s-cyan",   chapters: getDBMSChapters() },
+  { id:"cd",    name:"Compiler Design",                      short:"CD",    icon:"⚡",  color:"s-yellow", chapters: getCDChapters() },
+  { id:"toc",   name:"Theory of Computation",                short:"TOC",   icon:"🤖",  color:"s-pink",   chapters: getTOCChapters() },
+  { id:"dl",    name:"Digital Logic",                        short:"DL",    icon:"🔌",  color:"s-teal",   chapters: getDLChapters() },
+  { id:"dm",    name:"Discrete Mathematics",                 short:"DM",    icon:"📐",  color:"s-purple", chapters: getDMChapters() },
+  { id:"la",    name:"Linear Algebra",                       short:"LA",    icon:"🔢",  color:"s-blue",   chapters: getLAChapters() },
+  { id:"calc",  name:"Calculus & Optimization",              short:"CALC",  icon:"📈",  color:"s-green",  chapters: getCalcChapters() },
+  { id:"prob",  name:"Probability & Statistics",             short:"PROB",  icon:"🎲",  color:"s-orange", chapters: getProbChapters() },
+  { id:"cprog", name:"C Programming",                        short:"C",     icon:"💾",  color:"s-red",    chapters: getCProgChapters() },
+  { id:"fc",    name:"Fundamental of C Language",            short:"FC",    icon:"🖥️",  color:"s-cyan",   chapters: getFCChapters() },
+  { id:"fem",   name:"Foundation of Engineering Math",       short:"FEM",   icon:"📊",  color:"s-yellow", chapters: getFEMChapters() },
+  { id:"ga",    name:"General Aptitude",                     short:"GA",    icon:"🧠",  color:"s-pink",   chapters: getGAChapters() },
+  { id:"va",    name:"Verbal Aptitude",                      short:"VA",    icon:"📝",  color:"s-teal",   chapters: getVAChapters() },
+  { id:"bcs",   name:"Basics of Computer System",            short:"BCS",   icon:"🖱️",  color:"s-purple", chapters: getBCSChapters() },
+];
+
+function getCOAChapters() {
+  return [
+    { code:"CH-01", name:"Basics of COA", lectures:[
+      {num:1,title:"Basics and Prerequisites",      videoId:"1opAvMlPrGbCaT5B89heGf2pgwgKpvqmA",notesId:"1tRd3KVEgdQPMjXpCkvHyjb0EDf2TzQdQ"},
+      {num:2,title:"Basics and Registers",          videoId:"1MZk_aAT_WcbbG43-n48m-Mq1uW6cCFFP",notesId:"1Nc9-zM1TlfLNmnSIxSihGaNM6YDpSdZT"},
+      {num:3,title:"Registers and Memory Access",   videoId:"1An4tsOfMBpLKTXl_qsyB1FE5JSI9HvSF",notesId:"1XUhTAn4pINoQO9z0EbQ9E_jGnsfsvcN_"},
+      {num:4,title:"Micro-operations Part 01",      videoId:"1u7cuOHMcy0uYyeDKTg_XM1JlZSawr6Nr",notesId:"1qxNGbfUZlxUbH-SaLtn2Rmnw2MLRk_eM"},
+      {num:5,title:"Micro-operations Part 02",      videoId:"1jVO226gxb3QO53r5StXwuxvv15mRMyg0",notesId:"1WqW1giRXd3spjj1SOv4BGG0Hmhvvyx-j"},
+    ], dppPdfs:[
+      {title:"Basics of COA — DPP 01",                  id:"1e83syPiUXQywi8-E_wCXkkh9Sj6n7EH6"},
+      {title:"Basics of COA — DPP 01 Discussion Notes", id:"1Dh5RWVJqcFlP_mm5Ekmj5JweuswKJcTj"},
+    ], dppVideos:["1zwf3Jq_Tg4E-tzGqOArhUa_4pEPeM_Uk"]},
+
+    { code:"CH-02", name:"Instruction & Addressing Modes", lectures:[
+      {num:1,title:"Instructions Part 01",          videoId:"1rzqtzbIsQCcLtFBRJNHc64G-vXgyWbCr",notesId:"1aWxyecNF3nPvZHEttSj2_DCGGKf_rpio"},
+      {num:2,title:"Instructions Part 02",          videoId:"1CeNhIi7T6eiSIjcGJdIDnmdQ9huycxsp",notesId:"1ewg1OHcWDoME-e2qeax4IGgSKChaUzwI"},
+      {num:3,title:"Instructions Part 03",          videoId:"1XoIMX0e0hItwggBpR1W3gOCExOVr3cOU",notesId:"1j2ZKSKcGV6rnqmsSQdYZkut8NsISKwSv"},
+      {num:4,title:"Addressing Modes Part 01",      videoId:"1J-uHwLQOKyn7CjgWEORh3zS9R5uq1lth",notesId:"1WGqk2C0oOqY6ffefe6wk7cagmYm26--c"},
+      {num:5,title:"Addressing Modes Part 02",      videoId:"1yveysI1dnftOKdoFVqOdo9dAnYIZaQzY",notesId:"15DiLTYTppDvyhp2-lzHQbqWRsXiO7yxU"},
+      {num:6,title:"Addressing Modes Part 03",      videoId:"1Fp9C6q21Tqxf7DL-fnf9Ghs4_bm0zeMT",notesId:"1hDgrejEd9LZmt_G8CPvAeUjFoMLajrwm"},
+    ], dppPdfs:[
+      {title:"Instruction & Addressing — DPP 01",                  id:"10ey6iNlkK-3P62rb5w9JjS5ORRxqulqW"},
+      {title:"Instruction & Addressing — DPP 01 Discussion Notes", id:"1Rsh2BtDpJorG2yIBg4h_6O2losA9-3Ld"},
+      {title:"Instruction & Addressing — Extra DPP",               id:"1itYimJ3JmxoGmkbeHFe6jUwak3znn1lw"},
+      {title:"Instruction & Addressing — Extra DPP Discussion",    id:"1hS81NmNtjfyLIQQ-yf8RkHTIsQp3miDj"},
+    ], dppVideos:["1BpeoBGeJVHkwF_px5Yln2dmSwD1s_k13","1aP7Q1otdETpInQKeFi4ftCpZITFIN4LM"]},
+
+    { code:"CH-03", name:"CPU and Control Unit", lectures:[
+      {num:1,title:"CPU and Data Path",    videoId:"16aU3akIbL2gkCt0xe6Fw4WWHIeFPcOab",notesId:"1e_MSgHlVkKOpw-EW_MMWIhG44fpJkEXG"},
+      {num:2,title:"Control Unit Part 1", videoId:"1zBSM9aHy2IHAw9aUiLKRng4anmY1P4dl",notesId:"1SmQ_bAJ3O7oIYGfm9QkS8MpfvSj1CYl0"},
+      {num:3,title:"Control Unit Part 2", videoId:"12ukxwMn8Zy2o5drl0QHykAnFh-Cr7ZGq",notesId:"1n3njMizluyw7Ku4twgB1Y7cPTR66U0dX"},
+    ], dppPdfs:[
+      {title:"CPU & Control Unit — DPP 01",                  id:"15lZDUDUQFegCvGzUmbJzf-2C28ii3qte"},
+      {title:"CPU & Control Unit — DPP 01 Discussion Notes", id:"1cMLC26LMMScPkBTI1D9MS5qTUeptXoVk"},
+    ], dppVideos:["1HR76oC-FHWFCzmzjamEueZH-V4lvbfaO"]},
+
+    { code:"CH-04", name:"Floating Point Representation", lectures:[
+      {num:1,title:"Floating Point Representation", videoId:"1kn2Ebm7BD-h84othdNkaHYjJIjprAtVW",notesId:"1AxU8EuGs30Fe5hiEV_2XUuFxaKZFCRTd"},
+      {num:2,title:"IEEE-754 Floating Point",        videoId:"1rVZL3fe-bcM3z2D2tWWYMIpyAeolOSv7",notesId:"1fxiRGFM7m1i7NrkDAVqCz3kbbjs9bu6w"},
+    ], dppPdfs:[
+      {title:"Floating Point — DPP 01",                  id:"1jakvVvCplE3w3R8xFmWfW4788-FAv6oH"},
+      {title:"Floating Point — DPP 01 Discussion Notes", id:"1T60VDLWBstinVEb-YfpXUOnbTllFPuKD"},
+    ], dppVideos:["1-U1MGaWODUFd-rJxrF4iXwx_It65Ke2e"]},
+
+    { code:"CH-05", name:"IO Organization", lectures:[
+      {num:1,title:"IO Interface", videoId:"1qxvNVXeZan_56YQ3M9iBPEDVl3_ZDooD",notesId:"1byp1tFcshqlQDbNy3XM-WhgQsnsbXQXt"},
+      {num:2,title:"Interrupt",    videoId:"1TSC5kF7r6qIlMTnecZAoOveHCliQ22K7",notesId:"1CSB7P-31YK9kj-pw_CHuTj59yjD3dh9e"},
+      {num:3,title:"DMA",          videoId:"1F81ntDDQ-2vl9gFt6r11riRgL1UMh5MP",notesId:"1jNkKv2Ihxv9puo2mGfn2FqbxAfud4sQV"},
+    ], dppPdfs:[
+      {title:"IO Organization — DPP 01",                  id:"19IXg03LPrVYhFSO4xFfpqZfXUc0UhJ8Q"},
+      {title:"IO Organization — DPP 01 Discussion Notes", id:"1--8oodPxZiNAl6nTNAxjSZBYCYTLOF5k"},
+    ], dppVideos:["1O7Alsp6fQPDcp6BLSrJ604kdldM259Cm"]},
+
+    { code:"CH-06", name:"Memory Organization", lectures:[
+      {num:1,title:"Introduction",      videoId:"1nSDe85Dr1ur5ajh3498ZyeV_uhMcNco_",notesId:"1xAXHogYzfQjUWqdRZYS6tJqItgcQh4Di"},
+      {num:2,title:"RAM and ROM",       videoId:"1hEXMJPEpTgy2gKwSRr3pggLlOyxE1G0W",notesId:"1Q_lvx-n2q2iLwgo5qsK9CyqY5FtXZO7K"},
+      {num:3,title:"Chip Organization", videoId:"147MPzLO_PgbzqYVyQTE-V8hEJSzFozqJ",notesId:"1Si78zUhoJ8IzbD0KrqOQD_HL_NYD6eym"},
+    ], dppPdfs:[
+      {title:"Memory Organization — DPP 01",                  id:"1AB9GY5-wBo3lrzIUS8Xvg6rjcbIACRy4"},
+      {title:"Memory Organization — DPP 01 Discussion Notes", id:"13sFxlybaFFQRtGNTDas3-siLfoUIzlP6"},
+    ], dppVideos:["1bIY7sA14uklwqc9PR8h7fswC3e-qvRJC"]},
+
+    { code:"CH-07", name:"Cache Organization", lectures:[
+      {num:1, title:"Introduction",                           videoId:"1GTYEhgTUSdcCzAFgqMPOp6c8BcQSKiHe",notesId:"18mb4bkk8dl6ePsg_ySgVNPEk5vBbk8od"},
+      {num:2, title:"Average Memory Access Time",             videoId:"1OUHLVVYCedHK3vKqo8YioRhhsLdARnmf",notesId:"1YWDjQbWYCoaFQ5wQp2ZSd60QcHjzUfFx"},
+      {num:3, title:"Mapping and Direct Mapping",             videoId:"1Zx-Ee5IoG3ACf_0Em0LXPtATJzvM1LbM",notesId:"1h6RT7DtrFdEf70tLiOEU5_gCgUlhhMK_"},
+      {num:4, title:"Set Associative & Fully Associative",    videoId:"1Av2KVUfMyE5Ylwg2zoUrkVgDduIvNmXg",notesId:"1roBdOpW4JtvDHFtlrAoqw4f0GHE5z7Ew"},
+      {num:5, title:"Mapping Questions",                      videoId:"1VtTikHMKRHncwQdWPNfDbaWkIMeGM0lg",notesId:"1zO4qDM6SAOAKsXz8774OfskMegFm1YGh"},
+      {num:6, title:"Cache Block Replacement",                videoId:"1o42e7Z8HAsIBDRTsnBhFHc5uLIPt6-5A",notesId:"1fjnwDDKDFwAkoW7kw84kx5_mMNb9Xw1K"},
+      {num:7, title:"Mapping Hardware",                       videoId:"1_ktkd57mDJpk7uVM19oR0K5uLJvgI4yz",notesId:"1n05DL3pgOE1hNIwj4mn4D83aJQSUgiFu"},
+      {num:8, title:"Types of Cache Miss",                    videoId:"1LBc8oADjUL6996Tnd_x7pLh7CZw2uotP",notesId:"1lv3OW7EAQW0du9HWv4etVtoZAbWgMobq"},
+      {num:9, title:"Array Access",                           videoId:"18oNxGvWSnxiuyROndE43C5Su6WfFSpWQ",notesId:"175_6YZf9d2G0uShT4evJwE61mOm6YL46"},
+      {num:10,title:"Multilevel Cache",                       videoId:"1Ii3hLj-Is-ji_ubwiim_eDQkEw1j2aGf",notesId:"1nIM9KKl56vFe2dzLdr4INepSE21wMRXc"},
+    ], dppPdfs:[
+      {title:"Cache Organization — DPP 01",                  id:"1s_BCZ21nvjPzDCeS5eunmpOKf3Mk9z1v"},
+      {title:"Cache Organization — DPP 01 Discussion Notes", id:"1Qw_C4iAKReyhYLsNQDcazxkN47J5wRbx"},
+      {title:"Cache Organization — DPP 02",                  id:"19f_iiDseuhpp3ylwXYLL_jUI65keG1S-"},
+      {title:"Cache Organization — DPP 02 Discussion Notes", id:"1OE5WI9rGtUqwLoJTyE-FYmAl5M6eR6wA"},
+    ], dppVideos:["11ILFGiWAKBLyM5a7W9KuxH0hVf4ioyvj","1OBOfVrQupaTdVQtJBwJpnrHxRfL7LFqy"]},
+
+    { code:"CH-08", name:"Disk", lectures:[
+      {num:1,title:"Magnetic Disk Introduction", videoId:"1juFcPCF7EadwC9vZOrOiOtTAjlscBi3F",notesId:"1W8uF-3jjsBtPRHhkrKW--RTejohB9jxq"},
+      {num:2,title:"Disk Access",                videoId:"1igt_HIa3YYXc3PQT0-uMLLIsU5gGYPmH",notesId:"1cvpn9ra-TIAzUsMXL3WkiTzyNIdc5gnS"},
+    ], dppPdfs:[
+      {title:"Disk — DPP 01",                  id:"1kyLs6KVvqaNOq5tm3A7QVENFUloBmZGR"},
+      {title:"Disk — DPP 01 Discussion Notes", id:"1106razYkVFewM0E09sd5OwPw7pEXGDot"},
+    ], dppVideos:["1GvHNNEpKVjGqJUgGX9c5_cYhbpdZRKAz"]},
+
+    { code:"CH-09", name:"Pipeline Processing", lectures:[
+      {num:1,title:"Introduction",                  videoId:"1RrtbJoL5Hxivjg_yvQCswiSkz_8vLN28",notesId:"1W3lV5Nu1h7AeozWxqxBUZCFQV5XRduQu"},
+      {num:2,title:"Synchronous Pipeline",          videoId:"1jHOcrdtEDq_RHEjWeEb5IXlPM9FD5yIw",notesId:"1qzQ5Mjk7cGnVTBvzHTQVdbzTPXu9f8c-"},
+      {num:3,title:"Instruction Pipeline",          videoId:"1Oo89DX56Ua1MukF30XI-WC26dKyipsB3",notesId:"1nZaOh93mqc48iQtFYJzn_cboljLMrCbo"},
+      {num:4,title:"Pipeline Hazard",               videoId:"11wb3onn4YGJaduNhGO46N7LGihalqCs4",notesId:"1VP-Gtxl7xsTgBF75pqkt8JVDA7lGWcti"},
+      {num:5,title:"Hazard Classification and CPI", videoId:"1FTFi0P45fZgwV77SKxbblZTaheVd1ute",notesId:"13mPaXYD3sbBbJ7sW7SoD5DBqJ1z6Gq1E"},
+    ], dppPdfs:[
+      {title:"Pipeline Processing — DPP 01",                  id:"1wLvoDtY40Kl6i1ujLj7lBafr-vGboxA9"},
+      {title:"Pipeline Processing — DPP 01 Discussion Notes", id:"1QU4END433xBTWzt_vu88dIbKX4ZMuW3B"},
+    ], dppVideos:["1dgFfSRhqNbez6U0zTDioAoZOVSjUvc6N"]},
+  ];
+}
+
+// ════════════════════════════════════
+// FOUNDATION OF ENGINEERING MATH DATA
+// ════════════════════════════════════
+function getFEMChapters() { return [
+  { code:"CH-01", name:"Prerequisites of Engineering Mathematics", lectures:[
+    {num:1, title:"Polynomial & Quadratic Equations",        videoId:"1F6uXhZ0F8XwKCgXe61qHCND9-XMzi4JU", notesId:"1ftiy43r32jwkF6zpRkYn8OYHU9GH_dtJ"},
+    {num:2, title:"Inequalities & Mod Function",             videoId:"1PDwwXLFRn0Ef30G7fROuTUiAAmFD68iH", notesId:"1p_FDA2osVmbiyu4J0yerk_0IeACPd55_"},
+    {num:3, title:"Logarithms",                              videoId:"1Mk23NyTyhQ4xQgDTi4CsUZakb9yiBVV7", notesId:"15qXFeOOHMy1Q0dWr-i7dwWsEPeJjy6D4"},
+    {num:4, title:"Partial Fraction",                        videoId:"1S-CnUakeeJkBqPLOXvnaqWeE6WOhVhxc", notesId:"1EvPnvGbldu6OZHYPx4GpdwzmqaXAgQtt"},
+    {num:5, title:"Mensuration Area and Volume",             videoId:"1smIvBG3Vq0mBNPzPd0GgPpe1Ow2bcxEf", notesId:"1iBnzVqehNN2GlZ8N4zR3K-Oy5vvc1k7n"},
+    {num:6, title:"Conic Section Circle Parabola Hyperbola", videoId:"1Bd6PYj6L7q9hQg3_KUfWdkcT91hWl89t", notesId:"10TypbzJT11upn3PneTNtYAY2iqzRGe0-"},
+    {num:7, title:"AP GP & AGP",                             videoId:"1vB7rQ2CzQxoo0JoJBIa2RXKKMwRFxKpJ", notesId:"1nCcRsr-IE8hWQwqTaiEuUwu3klXZm2Q7"},
+    {num:8, title:"Binomial Theorem",                        videoId:"1YjZHqJaXhSo661Ai02uwhA0xyyHr3Ufc", notesId:"1d8Wv7vlr78ixS0hmcnJr-fT8ip7sYKkQ"},
+    {num:9, title:"Vectors",                                 videoId:"1ZX0_FAQZkZqGuK9dMjnl-SK06sN9KZeV", notesId:"1Tj6_vH2WsbFO1Y_hPQ8tOdUiPWJvL_J-"},
+    {num:10,title:"Complex Number",                          videoId:"1OZhEoqHC_Khknd76ubadHdN7jBnRo0NG", notesId:"1ofAxIjb0G_YBcBugjCqfMHxiPcYi57xb"},
+    {num:11,title:"Trigonometry",                            videoId:"1miDNKJe_4KMoQc4RXIbQJM1tLoY7mbT9", notesId:"1jvY_LSv4L_kzr-7CAwQoorXpFLd0Oukb"},
+    {num:12,title:"Matrix",                                  videoId:"1ojJ6BNNtvuxp01WjN0boKyj7iERXEnWa", notesId:"1sUsBDX0rv2BlPv88CaXYtnSYEbntqd-Z"},
+    {num:13,title:"Determinant",                             videoId:"1gQjGx_WSHvE7N8Eaj3WZ_xiXrKUhTeZ6", notesId:"1pUMieL6nmbpZeQUst9P1gNkVb91uOruH"},
+    {num:14,title:"Basics of Limits",                        videoId:"1VcJhnM4NVji5rZfNJcyZkGInPG6LGlLm", notesId:"1Oy7sGAgyyjnfUkJBoVRE9LO14vRHHa9R"},
+    {num:15,title:"Differentiation",                         videoId:"1CW8p-z1QaWueXWRwwJ36hn7zNN_hH0pT", notesId:"19Es-uS2m6x0iMr9L6jzVLJMf3X8DuRSZ"},
+    {num:16,title:"Maxima and Minima",                       videoId:"1V5K6QvbdNoAydrZocND0YAWu9NWKnmX-", notesId:"1cD2bMECNMwH37bEMZzdpt1dK4Ce6qqhK"},
+    {num:17,title:"Indefinite Integration",                  videoId:"1-KBbLE31_R4E3yobrjB-DdRtN0X-ToHd", notesId:"1D4io7d-CAYVA1-55jw_Mk0_qtYRn1PrX"},
+    {num:18,title:"Definite Integration",                    videoId:"1cmw08qXyGs58qNHcuuSS8fyjnU_-p2Ye", notesId:"1QzYSxVL4Jd_sLMrBam7bZRFmh_P5Lm30"},
+    {num:19,title:"Application of Laplace Transformation",   videoId:"1PnbvRfFNG27aP2Po8evd6WwaMlRN_ZL6", notesId:"1OgRXGoS1n-WhERSBFJr6_T2X4ToXdNPY"},
+    {num:20,title:"Linear Interpolation",                    videoId:"1YbkBAeIulI2yeMwuPmYBcnqOqTC_DJjE", notesId:"1sbnrzRyrwrmZ1_wJmS-4jZPAF99BhY-V"},
+    {num:21,title:"PC & Probability",                        videoId:"1diV_wWzdlPrDLUaVosP_1T8x6A-yRMNk", notesId:"1uQ13fRo0qrQt1_cNncBkHVnhqIuN4fB7"},
+    {num:22,title:"Percentage",                              videoId:"1-rbI8kReD9aRhqauczcm6mchmkXlq-a6", notesId:"1wwWxjK-Cd8gZjyIzJF9YsNBhvX2SPR2_"},
+    {num:23,title:"Average & Weighted Average",              videoId:"1kCu6BoO546zgmp7aB_eD39vMzLDr9b_p", notesId:"1xVn5QGDfbciZkg-YR3VkfcW8YmKZi43Y"},
+    {num:24,title:"Set Theory",                              videoId:"1MqU4Z74TaHkljkQKG-2yPYFyX92vAGwj", notesId:"18dBs3dQX7mRM0AH8U7sjqF2wBeSFol4_"},
+    {num:25,title:"Recursive Relation",                      videoId:"1F32SDI62i6yuN54YHHUogn90SWMVGhul", notesId:"1Y6Ltt4rwVD6heG8end1TkBZPku_foDrE"},
+  ], dppPdfs:[], dppVideos:[]},
+];}
+
+// ════════════════════════════════════
+// GENERAL APTITUDE DATA
+// ════════════════════════════════════
+function getGAChapters() { return [
+  { code:"CH-01", name:"Quantitative Aptitude", lectures:[
+    {num:1, title:"Calendars",                    videoId:"1wn8KidKFVbsZx1kvzlSP_e8spmUGcs0Z", notesId:"1Jg1ujr1pciOGP1pQ8kPWr039XJ9Ebq2k"},
+    {num:2, title:"Clocks",                       videoId:"10lbaFEck9p2GeB9V4Tmv1vJQOhs7f-b2", notesId:"10qp_uYeDZ0d-_LOMEHRmPsFSpss1XD2i"},
+    {num:3, title:"Average",                      videoId:"1qGdbpDD_lbw9Z2BqODotWx5PWlU4U98M", notesId:"1itgDgz24aqcSeDkvq8xs3OMp3FbvjCUB"},
+    {num:4, title:"Percentages",                  videoId:"1GM0zNnkiSglbocziU-MY8_eHw8yIe0X1", notesId:"1bX4aDcdbo_rNEZJ5AbwBDqu7EPae-sOf"},
+    {num:5, title:"Profit and Loss",              videoId:"1mf9xzBMVtmQoYatgPFFJDsIB7fPD48zI", notesId:"1AKomewLrpg9g_iuwzv__bv99QhJqj678"},
+    {num:6, title:"Mixtures and Allegations",     videoId:"1VnycyPGXA1l9vLs-t_HaDMFRFRrKqZoS", notesId:"1gt-pMeP9FGOz5Ls2tHANIlILla3Wa28O"},
+    {num:7, title:"Number System Part 01",        videoId:"1LegQTEcim_hqYyIotXySzY3O9UETAJTa", notesId:"1HWzguICgNeSGsfAEiqv4frt96mjNY6pG"},
+    {num:8, title:"Number System Part 02",        videoId:"1HCTpRe3yYvpFg2IDlrChqgtreSiZpBbO", notesId:"1rgQK4HILu89x8A8__zFFvWZQMS6qCc7e"},
+    {num:9, title:"Counting Theory",              videoId:"1sgguv1lICxBn8UHu3YFDzY-ZFQlfd_98", notesId:"1B-_SMuxcy13HBgeXyZlnpRYe6k6N3SAI"},
+    {num:10,title:"Time and Work",                videoId:"1xMioF16RYlEPOL1i5BeKGO17-31mlUos", notesId:"16nf0ErKarxDAMKEYrQS_2UaaIQSEOa9J"},
+    {num:11,title:"Pipes and Cistern",            videoId:"119QMnFElqQ1D67Qt-e8vOvAqgmY0vzLu", notesId:"1Y8EW21dJI8Neu2lxvgbIjOmhU_CQdpxh"},
+    {num:12,title:"Time and Distance",            videoId:"1oXpsnXhP5GqnxEQDIntFv5M5dsJKZdBv", notesId:"1AbdhJRtDnx8Iid_1wgRH7ht3sWah1qXy"},
+    {num:13,title:"Trains Boats and Races",       videoId:"1i7hBwlyhzoUILWJiK9Kn5YDaTkN8MPRz", notesId:"1MHhF61cs4Nzy4C7Osy0J7Ct6_fftvrwm"},
+    {num:14,title:"Data Interpretation",          videoId:"1inorZzXYmD87kZmOpzwpk3lO78bnFfvA", notesId:"1kBFAAa_fEbgGGQaamMapBXKkHMyCuQJP"},
+    {num:15,title:"Mensuration",                  videoId:"1Y6_hHNiwqeY_VNvEpYYMoPaBNFqdWsvm", notesId:"11uZ62HHnKwCOHIRu8URYYBdaPyu1SazH"},
+    {num:16,title:"Interest (Pre-Recorded)",      videoId:"1TN2_S6gPwq7UtJG_9hscjle_iaFEPrHo", notesId:"1-Cr_8gwqtfmf7UvQw_9b2SXtv3yrKFs1"},
+  ], dppPdfs:[
+    {title:"QA — DPP 01 Calendar",                  id:"1FPbeCHsod4wZxcFWdu9o1vp-ilPEtoJz"},
+    {title:"QA — DPP 01 Calendar Discussion Notes", id:"1GQCuUspS7_OqKEEwokFzV1NIBiyZPWrt"},
+    {title:"QA — DPP 02 Clock",                     id:"1quO33U_CjzS526oxG78Pr3la0tz4pX31"},
+    {title:"QA — DPP 02 Clock Discussion Notes",    id:"1YnteZA8x-AModG17th0wp5XmguggN6v1"},
+    {title:"QA — DPP 03 Percentage",                id:"1ketFmb-UMQhcfSmukxmOjjaxyyOk7TKF"},
+    {title:"QA — DPP 03 Discussion Notes",          id:"1hWmbABNGgqf6t1SqGt2kvQ37SKZIkLF9"},
+    {title:"QA — DPP 04 Profit & Loss",             id:"1XPO4EBXWWWOJz9c7HRFhyczhPmPsqdjw"},
+    {title:"QA — DPP 04 Discussion Notes",          id:"1ZVMhE2aBybTt215JbYLl7I5VVSQV-Qym"},
+    {title:"QA — DPP 05 Mixtures Alligations",      id:"1m4CzCoQpQD-S90h-PlEvPsEaqqMlm9vD"},
+    {title:"QA — DPP 05 Discussion Notes",          id:"1yy09Wa7R6gkuGiyATZGuctoLhehmrtcK"},
+    {title:"QA — DPP 06 Number System",             id:"1_RWfbw6nS1jGQV3TZpt4a1akVEzDt6kS"},
+    {title:"QA — DPP 06 Discussion Notes",          id:"1BnGjni3U_EPDbl1dcTH5_qS124YToEh-"},
+    {title:"QA — DPP 07 Time & Work",               id:"1BI7JKbqM_uX_ZS7z9iSHsh7J48akS87F"},
+    {title:"QA — DPP 07 Discussion Notes",          id:"1LM6su6JfMYdWbtCr6iiPlIQJYHym6_3A"},
+    {title:"QA — DPP 08 Pipes & Cistern",           id:"1mmKk0d5W9iskG2edAF6oYVObCiEIY4s-"},
+    {title:"QA — DPP 08 Discussion Notes",          id:"1sVtvHQSvH95L69sINiVCrRb-j0s1aUYX"},
+    {title:"QA — DPP 09 Time and Distance",         id:"1wFStERHNa79Q4WNMSux_XopZaE07Gavw"},
+    {title:"QA — DPP 09 Discussion Notes",          id:"10ljlaTn6NxEKOktk18hGbxDTCBoIbBka"},
+    {title:"QA — DPP 10 Trains Boats & Races",      id:"1MI6EoPyTDrHzAQIVj7cIb3Tu2jttafbT"},
+    {title:"QA — DPP 10 Discussion Notes",          id:"1u-n0MVDc7EACFsVlgYfW1UYKaN7_EBGm"},
+    {title:"QA — DPP 11 Data Interpretation",       id:"1_089ppvfbv_jqteHFoX-JksxOIW0DKzM"},
+    {title:"QA — DPP 11 Discussion Notes",          id:"1PMcWDMQqdM9Ym2GxkSp2mk8GzyfUvjpL"},
+  ], dppVideos:["11BgvYFwrvpgKjRu1nrPtt3pBwY5zd6gA","1y03cPSf_op1a83Xv_nCZBoh2VGwPjhcV","1cIAHqdDMq0RdaLGMLWy3cBS1HHSRfefu","1frIfiRitV3lLpAtjQ84Zc_VIbHhr2mll","1oR3N-RCVGBJHp2bOpEgSJGNGjNc-91d3","1mcl-kATZcXgBRZRjNFrUhkrsAVzVHJ6x","10PoItI615RClMYYYjoTkLHh6o1zpcUUQ","1PvkmtIkMP63rLRP6KVkV8Vv2f_Xl8joO","12lkMcSakBHsrrAc94vaoRN8OFmrh5l5v","1pnWnKiH8dtUSMiQSGRctx0-L7EqAKeOV","1d_IDz5xE7dR7vWLsj9hI-MQhQA_YyDiD"]},
+
+  { code:"CH-02", name:"Analytical Aptitude", lectures:[
+    {num:1,title:"Blood Relations (Pre-Recorded)",       videoId:"1gvPWUAmnyRDSYIoY-5OEIykNWpjaFfTl", notesId:"1HuLEaNgq2P-LHRIqTLyRQ48Pfhgt1NzH"},
+    {num:2,title:"Coding Decoding and Directions",       videoId:"1GHEFpkfgQr92N5IBSRRrPbGbL57ap4qX", notesId:"1MRqv_y9suC80PLjeOh_z5gQzgA-bxqQj"},
+    {num:3,title:"Arrangements and Ranking (Recorded)",  videoId:"14kZNU96utyHa9nQUGeqzjrrgx1Ws-R9I", notesId:"1llHxJmP7OfnrL1mzwxqf5ycYdnY2snWD"},
+    {num:4,title:"Problem Solving (Pre-recorded)",       videoId:"1VcWY7F2MBA8vf7ckWNnwZQX4z34bS18V", notesId:"1imMq8BJonh32-VxZZzGt2VtPaZlJMsUM"},
+    {num:5,title:"Cubes and Dices",                      videoId:"1X06XCO7xMJ2MUN0338WO2OT7oJfq4FLu", notesId:"1LLAY4SY-B5tMsauMPDc3c8O0l9WJrx3q"},
+    {num:6,title:"Venn Diagrams",                        videoId:"1MJGz5nZ8FOffu5KUVWzBKvODy3g8q1NX", notesId:"1tOHtMvRH_DQABV_OdyixexrDv0inwb4Y"},
+  ], dppPdfs:[
+    {title:"Analytical — DPP 01 Blood Relations",             id:"1NAHQaMXWLd2xg5IMWQb5csXUzyz4QAgC"},
+    {title:"Analytical — DPP 01 Discussion Notes",            id:"1gzvc7ALoD-ncFgLcsEE-Fz6pPt5PdoyZ"},
+    {title:"Analytical — DPP 02 Coding Decoding & Directions",id:"1bb0EFz98UnjYXFxed_x9K4PCriaEmmpZ"},
+    {title:"Analytical — DPP 02 Discussion Notes",            id:"1TFQ5bDXkFmvGUksE10qJeblL6rJlrvo9"},
+    {title:"Analytical — DPP 03 Arrangements & Ranking",      id:"14PojcY2Vfr-HhHJPSDl57bgkRw24MuOg"},
+    {title:"Analytical — DPP 03 Discussion Notes",            id:"15LbS8iVDVzcMhkNynJAkU-Rmx-spElzd"},
+    {title:"Analytical — DPP 04 Problem Solving",             id:"1t-uXJsNrcgi_BJYyIRcFurAgT-_tuPKg"},
+    {title:"Analytical — DPP 04 Discussion Notes",            id:"1A9kbJRcJjG0_byfsXu4dWZX3KgR4rHAV"},
+    {title:"Analytical — DPP 05 Cubes and Dices",             id:"1H_1p_SKKND-8--k01zTXcPOhGGNHVCQx"},
+    {title:"Analytical — DPP 05 Discussion Notes",            id:"1BS2n_DYtVWUxIwhUTK_T6tvY3cqHCtzY"},
+    {title:"Analytical — DPP 06 Venn Diagrams",               id:"1q58k7QZPh-YbqnnAXwpUJT8yaLd63qQY"},
+    {title:"Analytical — DPP 06 Discussion Notes",            id:"1creXYZO-W1jMiE6SlaEp2Dhyl7_MMu7V"},
+  ], dppVideos:["1gpo4XPQ3bYAM8SnLnplznXvVRl7cjiUJ","1Q9-1aFIHhHmcBYXAR_b1kT162ij2UHFI","16ziWLI-WIhvKawcUytusAoMU77S9o8Ne","18U-UzBExnkp8W6Hs3nndC_U2Kb3tNwNe","10lIMwLtbDygirsrrKceYxcoASZlyTO6N","1CZglZy_jGSkZ_WM7xMjbQ1lLE7i_zdJ7"]},
+
+  { code:"CH-03", name:"Spatial Aptitude", lectures:[
+    {num:1,title:"Formation of Images",     videoId:"1zvh_9alvixNmlDgTAgJNxi0WA6bgN1R9", notesId:"11t9P9lRQTrQYnnHcZ8nkRENMagGdWeWD"},
+    {num:2,title:"Paper Folding and Cutting",videoId:"1eAIEg38JRXXMTV8mtSePOMFerVEfEZEV", notesId:"1iBQIhqfVmiXF6PJRciYFc8vBXbJanrhm"},
+  ], dppPdfs:[
+    {title:"Spatial — DPP 01 Formation of Images",        id:"1dtOOvrP0oCO0Yz_TZCestymYNhuttFQI"},
+    {title:"Spatial — DPP 01 Discussion Notes",           id:"1QyB8JZ4zov5is0I0L1LVLd9BYEcgBmll"},
+    {title:"Spatial — DPP 02 Paper Folding and Cutting",  id:"19Oxm7ZvqWsLbMCd3GAnZTY2fVsQRXkav"},
+    {title:"Spatial — DPP 02 Discussion Notes",           id:"1WsBPtg0F8j9XqKiewedLDbAyztmMsc7u"},
+  ], dppVideos:["19ZzcYlTRVUZ596K3mS5q6_Ux4BItoOYW","1Jqk-2unVFZX-mOlEJrB3i0PTZYLkbts-"]},
+];}
+
+// ════════════════════════════════════
+// VERBAL APTITUDE DATA
+// ════════════════════════════════════
+function getVAChapters() { return [
+  { code:"CH-01", name:"Parts of Speech", lectures:[
+    {num:1,title:"Parts of Speech Part 01 (Recorded)", videoId:"1uxIwBbQoWhzlJQNrlJdZx31P93sqFyKt", notesId:"1Aho3IgdhtJvq5zB5g8eRDuehCTQ-I8oM"},
+    {num:2,title:"Parts of Speech Part 02 (Recorded)", videoId:"1gwXg_T4pzurSblaQKELVl4GkiFDOzdRb", notesId:"1-LBnXkyagR3s5cK3fp5B-3cISmz8-MZa"},
+  ], dppPdfs:[], dppVideos:[]},
+
+  { code:"CH-02", name:"Vocabulary", lectures:[
+    {num:1,title:"Vocabulary Part 01 (Recorded)", videoId:"1EmxK4HJpgUpDvo8ZN8OUYOAVA1l-jlXs", notesId:"1mYSFmZB3ohLnXbU0otDtScpPakQwT3En"},
+    {num:2,title:"Vocabulary Part 02 (Recorded)", videoId:"1d6mRilJ0PtgMg8fEvX6HJwoV75M8IGJz", notesId:"1kCHuwzCQwa2osCAo3z-C6PsHWR3gf8bh"},
+  ], dppPdfs:[], dppVideos:[]},
+
+  { code:"CH-03", name:"Reading Comprehension & Miscellaneous", lectures:[
+    {num:1,title:"Reading Comprehension One Shot (Recorded)", videoId:"1AdDvaDghTmdEAVG--FaqcdI6BIb-2Lr_", notesId:"14rfPiu_cZm-5ZYGVL2ZJkgt4EPVDTB2A"},
+  ], dppPdfs:[
+    {title:"Reading Comprehension — DPP 01",                  id:"1WCkgsUyexcCQ6G5RWiK430n4P6OXm7Oh"},
+    {title:"Reading Comprehension — DPP 01 Discussion Notes", id:"1YzcLnokwgpH0BgCadI2fV4IxTtkCauuJ"},
+  ], dppVideos:["1jVUWfDOgbT-aXymWuhJS607f1J5vrGTt"]},
+];}
+
+// ════════════════════════════════════
+// BASICS OF COMPUTER SYSTEM DATA
+// ════════════════════════════════════
+function getBCSChapters() { return [
+  { code:"CH-01", name:"Basics of Computer System", lectures:[
+    {num:1, title:"Components of Computer (Recorded)",       videoId:"1VVHXZGUL6F2r3TtUS1OjVDPsJo2JgWbd", notesId:"1xegSGvjDn6yqAWBnYeJ_HX4zjPV1geEs"},
+    {num:2, title:"How a Computer Works (Recorded)",          videoId:"1ZReEpHQmz0YiVMkcm8UlzSUS7buHf27Y", notesId:"1zVL_KuZpFMKLO2MMpBuoSNYQJHAhbt9e"},
+    {num:3, title:"Data in Computer System (Recorded)",       videoId:"1UFWN0EO8xe4fifN5jldG0VJN-XQIeXuf", notesId:"19TNQzGGMoyL_PE3M0YvUn2ea4WRznLcN"},
+    {num:4, title:"Number System (Recorded)",                 videoId:"1MUU34Df-sjMqSL4SJYZjZvifHT7w-uU4", notesId:"1q9_Bz7eokYBOMq8nD2Ea8Na4bBZWhyuV"},
+    {num:5, title:"Binary and Power of 2s (Recorded)",        videoId:"1Yk1gy1bawU-WP3b_ZJvaGaRC2k0rbL-U", notesId:"1Fud3a1U-hhVHt-LSKd21iphXo-Ebk8_E"},
+    {num:6, title:"Units & Conversions (Recorded)",           videoId:"1gdh8Hq9JC-y-y9oFornx9wclFCYfw0By", notesId:"1fPQENxdefipO3QwUQ8kx_VkF_q7kSQS2"},
+    {num:7, title:"Various Terminologies (Recorded)",         videoId:"1amK9TOuMCXlz8fkTe2fjpwgUjn4TS_Ua", notesId:"1pmycrNeVU2aaj8w1XdNQKDKbOS4r_bVr"},
+    {num:8, title:"Memory System (Recorded)",                 videoId:"1OoJzOIqvyopZColApnlgkGW8bvo6TytF", notesId:"14HKOKfc5QvC02DUMtP-dFTYqhpofUQQ9"},
+    {num:9, title:"Basics of Operating System (Recorded)",    videoId:"1n_B-eiCPdRyvioIP15CmtyoBanA9_7YS", notesId:"1ZJJ-8yQ4WEkQh_dMbMIXj_V9CCInj1jU"},
+    {num:10,title:"Basics of Data Structures (Extra/Recorded)",videoId:"1HBORHI_OGQZho-GQOL7h77qU1UOuZXOB", notesId:"1Z22whAuUwNZa0iOBjBVh34XV55p44gAm"},
+  ], dppPdfs:[], dppVideos:[]},
+];}
+
+
+function getCalcChapters() { return [
+  { code:"CH-01", name:"Functions and Graphs", lectures:[
+    {num:1,title:"Part 01", videoId:"1yQvL-od1dhhBWrUN3lEa7OHK4cLNm3kw", notesId:"1Lq9AqWpoq6NyOLqRkpfduJNDbif-if3u"},
+    {num:2,title:"Part 02", videoId:"1qSEbAcYX0-3ZTeD4oxJt2pCZlIwbScL7", notesId:"1lvZH7_PunT1kWAi2LeODh5m_VuSRmOBJ"},
+    {num:3,title:"Part 03", videoId:"1nziYgbRZ1B1CRvdLMsMLbM06Oj2XyuOo", notesId:"18ITJI1ddpB9lQB8_2jwppDpCaVFTAhQY"},
+  ], dppPdfs:[], dppVideos:[]},
+
+  { code:"CH-02", name:"Limit, Continuity and Differentiability", lectures:[
+    {num:1,title:"Part 01", videoId:"1W9KYntYqnh1C2PS1cLlsI_Kmaya9HpHF", notesId:"1CUjew2N1BnxE3lRJZ5NWuF2WhVq8il2W"},
+    {num:2,title:"Part 02", videoId:"1XN2KIVykb_r1FHdlUK-kz9Dfbjx1gvJC", notesId:"1FiyH-07brC5ATiiYBabaPsts8MDfqd9N"},
+    {num:3,title:"Part 03", videoId:"10p84j7oME5PWfsMsuxuvEyf_0z4ln8R9", notesId:"18mgueM1wvGlpxCwY_j-EjEHPb9b_XjTs"},
+    {num:4,title:"Part 04", videoId:"17q2cqXt6ZiLAwvw9uk3R8BSJ-78Cb_ub", notesId:"1KeCYNgU2fBJMf8c1GDkEQzjJVSHv064g"},
+  ], dppPdfs:[
+    {title:"Calculus — DPP 01",                  id:"12BTxGvU4B62ImiwWVKTANRwa72zOxPi_"},
+    {title:"Calculus — DPP 01 Discussion Notes", id:"1vxTe4CpnD6OUoR1JB5qebnnvDaCbML2S"},
+  ], dppVideos:["1ErTNDtS0bKoxhuxVdoelDEkYyPLLqiMw"]},
+
+  { code:"CH-03", name:"Taylor & Maclaurin Series", lectures:[
+    {num:1,title:"One Shot", videoId:"1DDChUrQv_QVqqEUbSgYOiAy86y5kc9Hh", notesId:"1lIUGTI03YmcjvDmFJaBWXkUlZQowkDBB"},
+  ], dppPdfs:[], dppVideos:[]},
+
+  { code:"CH-04", name:"Derivatives and Their Types", lectures:[
+    {num:1,title:"Part 01",              videoId:"1ZIa1h_W4ZCupIN-5f_GNxl6V9hCl7j5N", notesId:"1U6vTs0Vq92ibWjP8G3I7Q9tvTB-TUil2"},
+    {num:2,title:"Part 02 (Extra Class)",videoId:"1GH-vipqyvLUOCvbZDs2gP2v2qW5GcKAQ", notesId:"1Qc2h3c3qIBayPagOURbMDSYpLjgHxlFu"},
+    {num:3,title:"Part 03",              videoId:"1oP2A-A9ttKMzqtuzKRkuJ9IBuXFh_7HC", notesId:"1VdFS-HsP5RUFt5_Gh-Jql08w9v30twNG"},
+  ], dppPdfs:[
+    {title:"Calculus — DPP 02",                  id:"16PE6P3yVKbfs9LRIReBpFbT17W5d6P09"},
+    {title:"Calculus — DPP 02 Discussion Notes", id:"1SqUQtYA-mclvR6A1OFe-DAAhHxwx6e9m"},
+  ], dppVideos:["1fPOHU1n0jSoCgGQdBkDZPk5RpTwYrlLT"]},
+
+  { code:"CH-05", name:"Mean Value Theorems", lectures:[
+    {num:1,title:"One Shot", videoId:"1QJS7memk0rKitg-3UHlOMvjGzPTR9a7V", notesId:"1U87a2VWV_SNDogVZf2n9PMNnmH4FIerG"},
+  ], dppPdfs:[], dppVideos:[]},
+
+  { code:"CH-06", name:"Maxima and Minima", lectures:[
+    {num:1,title:"Part 01", videoId:"1IkyqAFp7cfyRS74Bp6cHZwbUytctbXqb", notesId:"1SEpHQpVNQqEzA-heR3eBhS4ND6Hdv9za"},
+    {num:2,title:"Part 02", videoId:"1-RdfaD2h_bwcEKtpfjDltczLrVZQS_tk", notesId:"1WZLuPZsEG3sL6K5Ecn5J2A548YnlR4Zm"},
+    {num:3,title:"Part 03", videoId:"1XpNx4TBbnT4iEpDWI_laB5EvTIEzJTrR", notesId:"1IENupWmg4alASv1mOb2QoDfSSKoL7SFE"},
+  ], dppPdfs:[], dppVideos:[]},
+
+  { code:"CH-07", name:"Integration", lectures:[
+    {num:1,title:"Part 01", videoId:"107QNz6VhVfix9TF3-6wTWvhTZXYt1Xwr", notesId:"1U-_LZQ0KwVmyzvyKUQ727QH0s7IXNE1X"},
+    {num:2,title:"Part 02", videoId:"1G3VZC7YIkZ4lbsPX4sJFMqOWkkjZ0lW_", notesId:"1ooL1c1BvrxPmxTu2jCwBzd-rn7LWKzDQ"},
+    {num:3,title:"Part 03", videoId:"1GC-SpSXTAK5FsScuDTvq5Z9wHf2l6eut", notesId:"1eLgloE_q5gIGhFhqTJAwMJTOnc5aRBNS"},
+  ], dppPdfs:[], dppVideos:[]},
+];}
+
+// ════════════════════════════════════
+// PROBABILITY AND STATISTICS DATA
+// ════════════════════════════════════
+function getProbChapters() { return [
+  { code:"CH-01", name:"Permutations and Combinations", lectures:[
+    {num:1,title:"Part 01",              videoId:"1sxlpQC-RlxKCX6WUayozQYOBRAXJ7L3q", notesId:"1tzBFLXaHDxzidZNAxFx4OurRReEDUZ2Y"},
+    {num:2,title:"Part 02",              videoId:"1c64XMqMEBq7iwmoB1wxLuldIDULFAkki", notesId:"18-_5M1YhMyGQnu37Fs7WgwaKb_hquXh5"},
+    {num:3,title:"Part 03",              videoId:"1H4PFQUlIGnSoP9rYDOlLQ4D4VpVSwtX9", notesId:"1ojQ1GH5bVRz7iKEGj-0a0MSVjTXD0HKW"},
+    {num:4,title:"Part 04 (Rescheduled)",videoId:"10rMKdChRH9ZPbiv3BVZ1vnbNaX1C1iAq", notesId:"1MPorKB5W4EMRSedIxn4CZP4rJUpG21Dj"},
+    {num:5,title:"Part 05",              videoId:"1OAkS_U673Sv6445SOD7WvD3gzWn1QoAw", notesId:"1DQELFo85TXW9vSNMJER8eqZNqrPH01tb"},
+    {num:6,title:"Part 06",              videoId:"1bqf7EzRbTq1pe5y9dSmtNDgftm0_BhqE", notesId:"1W0gP7AbuLJTxZTY9SA_NAsC0jpVbRdOJ"},
+  ], dppPdfs:[
+    {title:"Permutations & Combinations — DPP 01",                  id:"11G_GO9__iY5bsVMONwOX1nDiKDjOIAzB"},
+    {title:"Permutations & Combinations — DPP 01 Discussion Notes", id:"1LVsnsVCkA8N2T8hU6vNhfEcO4-EfGvW6"},
+  ], dppVideos:["19Ta8MCmtCT-goOe9j_RhcihpiEYq5_Lx"]},
+
+  { code:"CH-02", name:"Probability", lectures:[
+    {num:1,title:"Part 01", videoId:"1jBe8m4jYb4csNyWVxVabJn1WvDWdaC6P", notesId:"1BgX1P11C2iJNr6G6KxxeMbUxm4BF0fk_"},
+    {num:2,title:"Part 02", videoId:"13G4Nu7H73f7lYNVVmlpt7fYmAiaa6KUT", notesId:"1U_1k8-I7RwnyAdXdy9z7W2CXTGH5dFWN"},
+    {num:3,title:"Part 03", videoId:"1UEErtklK1-Ixvmv_TMdfm6st7mfDuR9Z", notesId:"1zCSd-7WfBpwmFXeKuyMD-sJOHigYK-uA"},
+    {num:4,title:"Part 04", videoId:"1Zzwxp3b3qTVmvk7oAS_b0hQIPDvWONXN", notesId:"16CMX0RMpNl3COPYzXB6S0o_IR0sLXcWG"},
+    {num:5,title:"Part 05", videoId:"1AkmINtHlOPyKvI_YS4WUUv2xgKPhWjyS", notesId:"1xwwsaBz5CuruhZJPGwyNEiRjsN_DXVcr"},
+    {num:6,title:"Part 06", videoId:"1DU9RfSb35UarXrMkUZh4Jxnp8k7qdkS-", notesId:"1Z5FFyTpW22VAVu6MjvUWqw7tYSU_I-dL"},
+  ], dppPdfs:[
+    {title:"Probability — DPP 01 Discussion Notes", id:"1_mw9NgqMzPYZ2AFcrVh27WOL0WuphdKd"},
+  ], dppVideos:["1hKdKCcT_ihE0gOYN7bASpbrCEqVbs1Sh"]},
+
+  { code:"CH-03", name:"Statistics 1", lectures:[
+    {num:1, title:"Part 01",              videoId:"1PScOWjwtaUDgWeCFwhy8otEykh-9t36Z", notesId:"1pDC0Abvnbc_Ri08b1dJG6mcuvuVCfHWr"},
+    {num:2, title:"Part 02",              videoId:"1GYbn5bbvH4B3HjDuee5CmJhmqPs7KXzM", notesId:"1DpsyJEB8QDbWaWVuekSLhtxMb09A3coU"},
+    {num:3, title:"Part 03",              videoId:"1f6gM-I-H8dbVQfLTLoWLk0RCOWE5Jog4", notesId:"1f47-f_D78C4eOt7048kNZXLc2K4ou52D"},
+    {num:4, title:"Part 04",              videoId:"1tMYhUsM9_tH4IA0RtAWxDVsr5Q7sp13s", notesId:"12aCtbvqLAmroGfgMC64IfRs4CnYi29Tw"},
+    {num:5, title:"Part 05",              videoId:"1ngyNJl9k1pdkxfvqr3M-gmpuyf8S3eN-", notesId:"1z89Rf5KCTBJF6XW2un5XOPeIZ2pJ9ONL"},
+    {num:6, title:"Part 06",              videoId:"1j15KltChpLNd7Wsck-qwE2aUBaaVPIEi", notesId:"1nwfAXGKodIXOndtrao4f_Xu23thwZy42"},
+    {num:7, title:"Part 07",              videoId:"10eWzrPZOZt8czT7H8XMRKDjRDP2LUS0b", notesId:"1AXaMHgoUGhORBUNQAnEFlf-Ef1BW5500"},
+    {num:8, title:"Part 08",              videoId:"1GEmWwgbsk947zha7sdMMR_FcXScLZJt8", notesId:"1XC1Leff6pAse6S43FRvSLbKuIP9t0Ftj"},
+    {num:9, title:"Part 09",              videoId:"13UNkST_7G3QWtQFVMVArRi2t-mOC0Qay", notesId:"1anTWJYjnIK-Vx-BefID77cL_gIYTvmfD"},
+    {num:10,title:"Part 10",              videoId:"1dRSU-_YkWZpt6zpzpdRd9A8jo5821AKn", notesId:"1fF--1Uf8QOuSlrZ2EllY0tPaSBGC7fdo"},
+    {num:11,title:"Part 11 (Extra Class)",videoId:"1YmA_8roX7e7E9D3JBzKv7n0QFNhbgz_C", notesId:"1kSSf96WtUwvEPqEld2LlDIndoabdY0pH"},
+  ], dppPdfs:[
+    {title:"Statistics 1 — DPP 01",                  id:"1UNRDNau3jJfJ918Xz3L98XGhN7qiUwHX"},
+    {title:"Statistics 1 — DPP 01 Discussion Notes", id:"1piCgx915SOyPE_McC1Yrp3-6yjoz7UtU"},
+    {title:"Statistics 1 — DPP 02",                  id:"14w7HOh3N2GBQ8YHiN5H0CSzqGL7kTlcA"},
+    {title:"Statistics 1 — DPP 02 Discussion Notes", id:"12vqHCMeGB8ZsFXMKMTkGC50D3EBx0Ult"},
+  ], dppVideos:["1CT_wXBrROk0zb3O3fi1vTsNqi7J9IGOA","1C--bfFBTaxshcWQS-WfiuO4ovQCD3nS7"]},
+
+  { code:"CH-04", name:"Statistics 2", lectures:[
+    {num:1,title:"Part 01", videoId:"1VgdlKTHaqinFVjAB3vcrrlpm9pUVF1VB", notesId:"1u86CE-aFFYbNdMYghAQjHK3ahNH2vtzD"},
+    {num:2,title:"Part 02", videoId:"1EsQtux7wAxf-GiYepDLv4y7pxE1sgDA2", notesId:"1e6WejEsur3scIPk2ian3F8bOVYjjeriV"},
+    {num:3,title:"Part 03", videoId:"1rNDLKBbKjzNVZCRcSxA1YW5Y2_L1X-ew", notesId:"1ZLd_34NQR73_KzAM6_vGL__ImITS12IX"},
+    {num:4,title:"Part 04", videoId:"1mYAKfKv9fYhUh3MtIeI_mevddba8M5L4", notesId:"1txbrmGyn7H3IDOce1tZVQXioJYGOQoH8"},
+    {num:5,title:"Part 05", videoId:"1vkXy-j7Tv_h9A3_ts80Z-n5_RXhKPCol", notesId:"1rvcd7_Ax70qL-ShVW5SHv8YlmVThf1ED"},
+    {num:6,title:"Part 06 (Rescheduled)", videoId:"1B1hPxvCdFSWIBcRVDAeyERzorDf0w4BX", notesId:"1khJzfq72s4p0zQmcGLffBcdSx_S4iAs6"},
+    {num:7,title:"Part 07 (Rescheduled)", videoId:"1gcbVm-ix_Q2r3pKf09B5NYB5_QrAc3du", notesId:"1kuoDgjwNR-L6NkaTPmKJVLJBbOG6GaM8"},
+    {num:8,title:"Part 08", videoId:"1SfM5B0gBXukpfZoeT7JX3GbSgoAJZDRc", notesId:"1dzKIfU9fWcu8HDxVWELsVWx0iwK42Cam"},
+    {num:9,title:"Part 09", videoId:"1wMJGyYwqsdYHbxEbae4etM99eeg__8ql", notesId:"1sqIX0TvsRnX43mT8iUIYFkHk76IlmAc6"},
+  ], dppPdfs:[
+    {title:"Statistics 2 — DPP 01 Discussion Notes", id:"1GVhSr_wS8BoQHC39dNxJbzSTh0myo-nZ"},
+    {title:"Statistics 2 — DPP 02 Discussion Notes", id:"1uaeC8v4bHl7L6JJVXoSOTQJbP_VmAL8U"},
+  ], dppVideos:["1Lk3CTH8-IdEeuoAHOJLBFtX3x7p_nx7W"]},
+];}
+
+// ════════════════════════════════════
+// C PROGRAMMING DATA
+// ════════════════════════════════════
+function getCProgChapters() { return [
+  { code:"CH-01", name:"Data Types & Operators", lectures:[
+    {num:1,title:"Part 01",              videoId:"1LFFnOat-yQ8948Hj4xxY6V6DzKHjymbQ", notesId:"11BaMrY2tftlxCNIsyVw_-9yF46qf04eC"},
+    {num:2,title:"Part 02",              videoId:"1yPgAkCt4QADdIzmQCRW-BY3H9xG4E588", notesId:"1MZSDHEW-wchuBvqp3N0MNbaCCI0jTs_P"},
+    {num:3,title:"Part 03 (Rescheduled)",videoId:"13gvLzYsecDaefPR-8hF7i8OPm3KZpqXE", notesId:"1Si0UUmV4-np7qwJAv-Rd8Fc9OewOYKQs"},
+    {num:4,title:"Part 04",              videoId:"1yKKWmE49t5OsfxQGlZkrrIunz_0l5plR", notesId:"1btTzFanpq7Oi48O0VjS0BDD-gPBR2r7R"},
+    {num:5,title:"Part 05",              videoId:"1KIWJy3E0F3TlRuy-_G1Iwk53eNjES3rj", notesId:"1G0LqT7mlcjoXwdhfkI86fWrE0aBS0nDU"},
+    {num:6,title:"Part 06",              videoId:"1nECE9MsMVu3A2ZqiourTPbM2aJV6MWZ4", notesId:"1Omy1Bhq-YrJgfT6qwKeRuPQ4IDYKDJIZ"},
+  ], dppPdfs:[
+    {title:"Data Types & Operators — DPP 01 Discussion Notes", id:"1gfvJweAqMgJg3S71_EQFxns0euCvRa88"},
+  ], dppVideos:["1gO3ulnK4z-e9kJQU8UFKBEJjMwP_xMxQ"]},
+
+  { code:"CH-02", name:"Control Flow Statement", lectures:[
+    {num:1,title:"Part 01", videoId:"11tdAj4K1NzaF8rBX637uWsiDAUOnRKby", notesId:"1lt8ueKmdpfr55j-lS1GIn9oYEFT4OGID"},
+    {num:2,title:"Part 02", videoId:"1-uj9b1hEsBxRZ7X5vLqJ1ba7EuLeoWTC", notesId:"13cX97YWvIhGhPjiQ0sPSjGw3n2HhJ3ZE"},
+    {num:3,title:"Part 03", videoId:"1EYVK8eYlSOftoel4M3NWBOGjSwWfBJMF", notesId:"1kZqvJ_eaWKvPr7FioJNcXGQP9nGNasfG"},
+    {num:4,title:"Part 04", videoId:"1nrK7Vp92CjyfXFTHMQw2fGZb5KT5HL1Z", notesId:"1houwlbpz2SKZP7gcHVJh6uJXvZjOiZNx"},
+    {num:5,title:"Part 05", videoId:"1MnURaaLWmUa1XOStmhNEbzGgFPXM0Jlg", notesId:"1U0ivK8HhBQ42y7QCsCfpjozYQJfGRffc"},
+  ], dppPdfs:[
+    {title:"Control Flow — DPP 01",                  id:"1cNVCd4q11NKoC-PpjH8TYHsbHDR5mDex"},
+    {title:"Control Flow — DPP 01 Discussion Notes", id:"1Ig8jxVghcLHlohyndAC8TbvDbMRkPUPU"},
+  ], dppVideos:["1Mz8S1YsyUnacnk3T1GlDhQObPR2PqVy2"]},
+
+  { code:"CH-03", name:"Function and Storage Class", lectures:[
+    {num:1,title:"Part 01", videoId:"1PIiyVA6ami0db_0enam_-gLm9v07n5xF", notesId:"10f0l20t0FVCE5w2FkpYk6Ywj5Ds--4Du"},
+    {num:2,title:"Part 02", videoId:"1SPut-aGzf6yexY-BnP3zvXLSH_THJOTt", notesId:"1wub8U9xuTe6Sqcw8BKI55T4TzCQh6zml"},
+    {num:3,title:"Part 03", videoId:"1VrerpHUfxduR0SFeWxw8EU1xiy7LcvLY", notesId:"1sdsC5c7UNET5McBKixLnXj_n7pF_NGyv"},
+    {num:4,title:"Part 04", videoId:"1rc3AGZKRG2jmJzYX67RjO74YsoksBN0d", notesId:"18zTMrQnOfsxWL99F5LxSA_LSAC-qCsJY"},
+    {num:5,title:"Part 05", videoId:"1c4Xh22RbdRt-055jFa9IQ9dxUiXmuG-1", notesId:"1FZUxMhQvcsX-MfXmBHYsBumMBOSCvJDn"},
+  ], dppPdfs:[
+    {title:"Function & Storage Class — DPP 01",                  id:"1E5ejK8Sxv0SRAq0lNjnObDC-vUJPrpK5"},
+    {title:"Function & Storage Class — DPP 01 Discussion Notes", id:"1TnJC3RDh4xbtVZT06cQ-QO_vsXL6MimL"},
+  ], dppVideos:["1XNbHk9bLi4ym23lw7Ve0UVVfPGv5ExYg"]},
+
+  { code:"CH-04", name:"Array and Pointer", lectures:[
+    {num:1,title:"Part 01", videoId:"16RGYIwvc_duM3fBTODek4k2qLAExYLKu", notesId:"1nz0jK6Ql6rrU-eDc3hrZhre2X_9ztEoa"},
+    {num:2,title:"Part 02", videoId:"1YDtbhq68N7SYPXdeK_is3LHLzzPOULa5", notesId:"1Bgw9HvoVrz9p0MUPN7MBx6vv1bKeEKGe"},
+    {num:3,title:"Part 03", videoId:"1dE1IGJEcUAczl0Z4enYVIoVV4_d0LhKY", notesId:"1JcVYOE8c7-w0NWM4ynTb2qEUPX0BL8cx"},
+    {num:4,title:"Part 04", videoId:"174P33DXeMxrn7ZVC6Y3egIjC9kMlT9C4", notesId:"1ON0Wmpxfg1liluxmz2HoTkghQPa-3LzT"},
+    {num:5,title:"Part 05", videoId:"1hfOqEuCDwZO3QU7Rv7Z5l3fuupyaOVli", notesId:"1gQKZ8EjTnegkm93VOi6jnIJVY1A47-vF"},
+  ], dppPdfs:[
+    {title:"Array and Pointers — DPP 01 Discussion Notes", id:"1aq5dZmjK-Q9UzkXSjoGOMGN82AWWw58w"},
+  ], dppVideos:["1y_Y9qCZ0fjJ7I8pRpJfZUAB3YZZjk52c"]},
+
+  { code:"CH-05", name:"String", lectures:[
+    {num:1,title:"String Part 01", videoId:"1SUTY0u2Wt7k8lW3-oippj9gGr4Q9sCRP", notesId:"1Bwhx5wIfufmKQ6aslvt_VCWmhR83P2gJ"},
+    {num:2,title:"String Part 02", videoId:"1prRN8wtH7FCGgocKJciPyOUYJWhCmPrn", notesId:"1J_FlnNuzqm0DJcSdSQAU1bESeJCVwFvH"},
+  ], dppPdfs:[], dppVideos:[]},
+
+  { code:"CH-06", name:"Structure and Union", lectures:[
+    {num:1,title:"Structure & Union One Shot", videoId:"1o_9CPI329HtinDhsZhBV_eXNAVAOsQS2", notesId:"1-6EG5msX3OaZsCEGy17Odh8bOgYEPeij"},
+  ], dppPdfs:[
+    {title:"Structure & Union — DPP 01 Discussion Notes", id:"1PvOy79h7brJCRKSqaDRoebqTvm70V7Y0"},
+  ], dppVideos:["1hoYLt5MXTatCwD7MNjGVBXucx88pVax4"]},
+];}
+
+// ════════════════════════════════════
+// FUNDAMENTAL OF C LANGUAGE DATA
+// ════════════════════════════════════
+function getFCChapters() { return [
+  { code:"CH-01", name:"Introduction", lectures:[
+    {num:1,title:"Language Processor Part 01", videoId:"1RvkCvz1VUXKNkpDrRY_91dx8iz0S2Dwm", notesId:"15XQT7A1_VHW0vrpmcvpzpODcYjI-6oII"},
+    {num:2,title:"Language Processor Part 02", videoId:"1_UCItGVf6aoTuzCToDGjyx6vxUbUP6s7", notesId:"1nLS9iM4yhiTT7ntnUG9DZwT5310DOt8t"},
+  ], dppPdfs:[], dppVideos:[]},
+
+  { code:"CH-02", name:"Data Types & Operators", lectures:[
+    {num:1,title:"Number System in C",   videoId:"1OG055gVnBQkzBMrviZj3ll4W3F5kTnvz", notesId:"17E07Z6aUF8t8Ewkc9arivSZMdmxAwGpQ"},
+    {num:2,title:"Structure of C Program",videoId:"1ZMtgnx_2OFVbf0gSGkwq_7zcJKyDafNf", notesId:"1i5pSMpQwNRR3A9RHmOT1B6I9JuBZv5Jy"},
+    {num:3,title:"Data Type & Operator Part 01",videoId:"1TuySB2UTalhi54dXjTq93ZCBkNlCRGOz", notesId:"12UYwMZnnitZw595ufwF1116zvJ1Yd2V8"},
+    {num:4,title:"Data Type & Operator Part 02",videoId:"1MSY5QdW03IyZJQ5bcB_cN03JxcWdGrMR", notesId:"1mD99U5-aNJuo7HTfzE2DtyKNvvKYfSoa"},
+    {num:5,title:"Data Type & Operator Part 03",videoId:"1FQisMvX4q7oTuxe8nFZw06dMypXUrii1", notesId:"1n_w0Dp5BWGNXT3-IBr-4zG_3ziQK9bIq"},
+  ], dppPdfs:[], dppVideos:[]},
+
+  { code:"CH-03", name:"Control Flow Statement", lectures:[
+    {num:1,title:"Part 01", videoId:"1hnqIEOWXC0n_YXx6F2xXvb01f5s76AN_", notesId:"1zq8-AW4lZAq0tOCsv3bWue2L6xdJvmyi"},
+    {num:2,title:"Part 02", videoId:"1-CP4g0AqR499ynur19wPgrjgUXzvMvNR", notesId:"1P-paJcikUuQluSxxw8O7gHzb8ghOlpYU"},
+    {num:3,title:"Part 03", videoId:"19JbbAZ0Wn-6-59FmjJ7dkYs_dYA0wvSi", notesId:"1wLgUTfZg5rlXaaWJNJfqsu51z99KvR9D"},
+  ], dppPdfs:[], dppVideos:[]},
+
+  { code:"CH-04", name:"Function & Storage Class", lectures:[
+    {num:1,title:"Function Part 01",    videoId:"1WTsAzaecM6sRxpmaIvhVbCPqaKO-ebYl", notesId:"1kDMnp7QuG9t26Ld5k6QtXoxng0wuMiD9"},
+    {num:2,title:"Function Part 02",    videoId:"19YRNUfrgVJYXFdDKPRtsYt4WS5qLGiZl", notesId:"1gLAbtMkW3cfKqP3bHHK-oHG806vt5eph"},
+    {num:3,title:"Local & Global Variable",videoId:"1YByfFmIiCfd0Z2uuOkGIpOaiWAWRJAZ9", notesId:"1iJ8TsMPuz7dezhupduR15W0b8DNtXU00"},
+    {num:4,title:"Storage Class",       videoId:"1PkD-wk6Qo1-18WlP52SoLrtW9mVH2eU3", notesId:"1DC9xOZNPYm5PPbB9XN94_TTPdrQ3dFVC"},
+  ], dppPdfs:[], dppVideos:[]},
+
+  { code:"CH-05", name:"Array & Pointer", lectures:[
+    {num:1,title:"Pointer",    videoId:"1R3UGnTlqIc13C-3ES-J4Yl0LiF8ckMT7", notesId:"1F2oxQGP78v66qlyu0AlVW0XsGmnzWskn"},
+    {num:2,title:"Array",      videoId:"1tVdVa00yZXcwU8tqo50L1fcsGuTbsu97", notesId:"1ckkbq1MOG1nFHm4ODzLoTSeyYmjrgsXx"},
+    {num:3,title:"Array 1-D",  videoId:"1TeqMVVRZIo0vxPUrCAFzNSdBfHwjb_2J", notesId:"1YrYomteCnks1wcEQQCQyge1xRALBtFjD"},
+    {num:4,title:"Array 2-D",  videoId:"1_p_RLBQLeY8EQs7XslQ-N63zZS9TNT3i", notesId:"1_pe4yXFKH5qZNvfpLCOgCgHkL01E-j2s"},
+  ], dppPdfs:[], dppVideos:[]},
+
+  { code:"CH-06", name:"String & Structure", lectures:[
+    {num:1,title:"String",          videoId:"1g6d0QqWp9T3WOy_WYQ8eC81H5Hzm1Ea9", notesId:"1pICti04fsKy5_CeqkjRWTlghySyF7V0Q"},
+    {num:2,title:"Structure & Union",videoId:"1IvM0jiw-o9eI2JL0IU0BjM1Uye9atgEF", notesId:"17rfQ6cEMvGb0fWpD3PkqV0wdR3dD5WR_"},
+  ], dppPdfs:[], dppVideos:[]},
+];}
+
+
+function getTOCChapters() { return [
+  { code:"CH-01", name:"Regular Languages", lectures:[
+    {num:1, title:"Part 01", videoId:"10e6pRKLLUK48RADGma8c3ZqMVPzAP-fe", notesId:"1yI6ysi9irjgyqsCgoVRGHSdDTt-O6d8_"},
+    {num:2, title:"Part 02", videoId:"12KfNyeykAbVR6UiyqyAm3TVqfztF8Efz", notesId:"1E0HL4B31JffX0xqv6N03QgtNqDwNyveG"},
+    {num:3, title:"Part 03", videoId:"1k3e0cvqnzIQ-UhPQ3awomjFiUdjK9ESG", notesId:"1sl5vwbEJ0t34vcp2RgC_8UvaqViiReQb"},
+    {num:4, title:"Part 04", videoId:"1Ua31_k1rUilW2C7PD6xilkb94POlZaqL", notesId:"1IRF5nmLVEKXD8ScNG8c2tRX3gdYod_uW"},
+    {num:5, title:"Part 05", videoId:"1hPFrOgSW4eDHiImLvhgbG6ZEtgRqmfrO", notesId:"1AGD62rTh7kpLjd_JRSKI4pQiF4jRhL1i"},
+    {num:6, title:"Part 06", videoId:"1m9U5v1zWs21zyiAZ5KEHLC1q2eYxN1Px", notesId:"16PIWq4bns_DrTBL3Pt6Ik1tdrasYnTQ_"},
+    {num:7, title:"Part 07", videoId:"1jA38xsCAfRS0DA1vRXk6WRFrpurX0Ayh", notesId:"13OTqIRRe9JkmeNvUK5qLnBy191JOl8gr"},
+    {num:8, title:"Part 08", videoId:"1LCIWDWlaLV1bkvV4-u8pnioMJunF10e3", notesId:"1zPLRGx37-9d0ZI5EnsDD3NGb_wUmzwYk"},
+    {num:9, title:"Part 09", videoId:"1poD_kj_o0Ai0MjMHUX9o9JEObqiIlXUA", notesId:"1zteDWbhB9M0de1untx7XMXqj15tWegb7"},
+    {num:10,title:"Part 10", videoId:"1JD2_YbxCvjl_BCJGNYFn5flsWPIL62OM", notesId:"1z-C4dj94oT0TQcquRmtaCaYXnV-XUaJc"},
+    {num:11,title:"Part 11", videoId:"1yIwbS631B-sdg8ddOu3al-wmyaMKfG75", notesId:"1G2GcB5o5_uP2Z_ajR1gHT_TSVN6pUqeL"},
+    {num:12,title:"Part 12", videoId:"1Z2UGDdg6pYO0qD8e6e9N7yzV2DbIIFOn", notesId:"1i0957xfjWmFpiyYnpTnjXV6t158yI8gr"},
+    {num:13,title:"Part 13", videoId:"1exRbCwoCdr0I_7QztCuHuPdQR-oQqfq4", notesId:"18q86F9ciOeWBqYalUkY6eOmPOc4dSBL5"},
+    {num:14,title:"Part 14", videoId:"1FCgtjabgnAFYDHwQL-s9HmumQqqOXx6n", notesId:"1lAhKoAWdZMxGf_GOhIgQXkUQsiE51jso"},
+    {num:15,title:"Part 15", videoId:"1JxJRPvx23JiR_lG-d_-SvCO5RCcMd_2j", notesId:"13xM55tZTBi9-9gz-OeRL8j2U37xnnct0"},
+  ], dppPdfs:[
+    {title:"Regular Languages — DPP 01",                  id:"1fZS2zibv2jJv2na8OQ0iHsVWpCvJtEOs"},
+    {title:"Regular Languages — DPP 01 Discussion Notes", id:"1sXS5eNobp0iRLO1-hzB_XtOxbuPkJhHi"},
+  ], dppVideos:["1nWZEo573NADmshXPwCLvE09eUNaPR0As"]},
+
+  { code:"CH-02", name:"Context Free Languages", lectures:[
+    {num:1, title:"Part 01", videoId:"1144xmsVfFAGLsVmrz6R5Ivdhy6-E3oXU", notesId:"1St8sOcQ4KygsGP9soMqlwDKZmVdyh5zo"},
+    {num:2, title:"Part 02", videoId:"1RSzokeMIXVH_AYocuCoryxVtU3544pSl", notesId:"1SzOeO8u0r1h0e0A_hLtn5u4KR788AsWI"},
+    {num:3, title:"Part 03", videoId:"1lvLKXBgddzBA_d-QPyp6D_eccVodWERk", notesId:"1pkzpPBpm-3o7yHMBAmC4VFeNaFodx1pN"},
+    {num:4, title:"Part 04", videoId:"1CfHhmfKWHcYH1hFy30iO4THr6oo9W19r", notesId:"1Vb9-U_obJeyeTvk0Xs5QzCcgYOs1IMem"},
+    {num:5, title:"Part 05", videoId:"1HHSMeUB-1u_srQQpTJ58GsWAeWL_zPie", notesId:"13gbjbFkKqNAbmIZwYaGFm8FhMql6D72l"},
+    {num:6, title:"Part 06", videoId:"1WTgdILGGjuelGgZxWvqvg_hboZeT0gEN", notesId:"1YassKepkjRViP-ub1WHy5jLv0HnDW4Rg"},
+    {num:7, title:"Part 07", videoId:"1-g8Y35WAOdXegL-1fvjHyHbYBdsTojO8", notesId:"1fP0oxDDCE53KizCkjA9GDg7KPcdjj-mW"},
+    {num:8, title:"Part 08", videoId:"1t_uTgNU4HzigU8trEugPV58RvH7vdUpI", notesId:"1xN4KJJZBca3WYGTkHvYJ34crGgF_uMgu"},
+    {num:9, title:"Part 09", videoId:"1aVTR286rReWD5x1_DX7eTviptbvF-y23", notesId:"1oEP4GKE-6jcXhNy4aPxjMhyhOfi7ePOY"},
+    {num:10,title:"Part 10", videoId:"1Yr0gi1ugAvgEqxVVlOn-J_yJmvqtpdy0", notesId:"1J5DynZT5RRWc2HG7gmjox80UXN2e8U-O"},
+  ], dppPdfs:[
+    {title:"Context Free Languages — DPP 01",                  id:"1Yzka0eqtTRxe97Qcve2KNi45tne8FZIW"},
+    {title:"Context Free Languages — DPP 01 Discussion Notes", id:"1uZGXwJxALDmSenJldfwkSXWx0DKH-icy"},
+  ], dppVideos:["1mj57YVOWvvmsQ8cl8fUszSSdqKCyXYPi"]},
+
+  { code:"CH-03", name:"Turing Machines", lectures:[
+    {num:1,title:"Turing Machines Part 01", videoId:"1IBssiyNp4xZgTGV1ILdshGjZnUJItYH5", notesId:"1ljQ7zQB3AGnclX_Gumc_SMtE-iM6R2m5"},
+    {num:2,title:"Turing Machines Part 02", videoId:"1Z4ckSUOyTSuX17DEJwxMecOhsIJQCcPL", notesId:"1zbFdwPKbmT6RdqE4MGkMB8k4WY0U3BBc"},
+    {num:3,title:"Turing Machines Part 03", videoId:"1vcJQLAQDPININH8gKoaTAy-IcIejOnH9", notesId:"1DAn3sRSQcwg4BBiwQiHeOmogyQhUXNpZ"},
+    {num:4,title:"Turing Machines Part 04", videoId:"1kr-GxkGmgcuIDwSIZXgauHYKONdBe5c_", notesId:"1msCTK-yACCWmRNgXPx3Qw6EsN1Xi_naZ"},
+  ], dppPdfs:[
+    {title:"Turing Machine — DPP 01",                  id:"17imPInXHx1U4cND2b4eYhKgU1g_kdl98"},
+    {title:"Turing Machine — DPP 01 Discussion Notes", id:"1odTbUz8tHuWhiXWLeKBHLdKil1kFrU85"},
+  ], dppVideos:["1h8m6dA4JGa8p05t5_XgnyWfO7IIFdcQJ"]},
+];}
+
+// ════════════════════════════════════
+// DIGITAL LOGIC DATA
+// ════════════════════════════════════
+function getDLChapters() { return [
+  { code:"CH-01", name:"Boolean Theorems and Gates", lectures:[
+    {num:1, title:"Part 01", videoId:"1EJMasmBtpCXl0RMYbX_3ZeM19jrllsqn", notesId:"1QJ_5Zmb70J4sPj_rSR13sDXaJXT7Zl7Z"},
+    {num:2, title:"Part 02", videoId:"1TcMX11mvl3fcHI1uNsoBs5BWyUPfrK_9", notesId:"1EpGRMR6VnTL637schE4agWuoip_O6eG0"},
+    {num:3, title:"Part 03", videoId:"1JtuiqsJ3xbMkdfj0GwL__bMyO9b_8_8s", notesId:"1pI1kQc298SKxgrOv_w3H-y6Fry3q5vUz"},
+    {num:4, title:"Part 04", videoId:"1epeEuQ6qf4yx0qHc2kzwhPp1TqsxOEzL", notesId:"1VARHoAq4Z-0Ptv37OYOyXdXRyeC1NsmC"},
+    {num:5, title:"Part 05", videoId:"18OvuWWYaTd6ciy4pxLrGCf8Lx-sNFTU_", notesId:"1UtR4X6y5K9QXjr0p0Ey965bOOPQVO6gn"},
+    {num:6, title:"Part 06", videoId:"1NSux21mctIorV_y5_oT4V1R38xEIVXd6", notesId:"1MUaFcM9vOIo7t6bGHZIkU1GLtszfcuby"},
+    {num:7, title:"Part 07", videoId:"1hGefB_G0xU1vuYWa7qsuUmbLo_Fiw14Q", notesId:"1sB5bBVfNS-vaW8OpUnZMhUmjEXzednOs"},
+    {num:8, title:"Part 08", videoId:"1yVStMuMzUWHceoDwzQ7PXdY7Af3Ogqwq", notesId:"1eCx4Au9TYDQGa4mw7lNHg1HM5B8-GoVD"},
+    {num:9, title:"Part 09", videoId:"1EA1gJqgZ-8sJF0o2mLzX9AsxLiLLRey0", notesId:"1rmiuvugFeJ_3xdTlno7LmBmDN1V1BZAx"},
+    {num:10,title:"Part 10", videoId:"1UQ8LVCjbgzHAG3pO3h5EKDQ5bXJKBk4i", notesId:"1uYmikdX6oAyPN0HKYoTIaXaEkWh2usOo"},
+    {num:11,title:"Part 11", videoId:"1XRYvNx-b8_brwniZEUQTicPuxBcrRM5L", notesId:"1mfg07IneJMjg6GbtUdN-dqipnQE1Hz7x"},
+    {num:12,title:"Part 12", videoId:"1h8j2K2ocL4HrQtjB1xgP-Q4mYHmLup_Z", notesId:"1uCRyJllz9tdVk912cfi1trhoPE8cBB1l"},
+  ], dppPdfs:[
+    {title:"Boolean Theorems — DPP 01 Discussion Notes", id:"1mWucDcfC_oIJtLx5PKOjAUYcprBzGNmg"},
+  ], dppVideos:["1kdpwvcHJQB-gkCorK1Yja9cLQMY2ChjG"]},
+
+  { code:"CH-02", name:"Combinational Circuit", lectures:[
+    {num:1, title:"Part 01", videoId:"18b1-eC_zl1XtMsSwMxoMWUrIyR4vKTGb", notesId:"1-Cow7_kRpwaYy5VWSTcN_-wSvF8fUPRt"},
+    {num:2, title:"Part 02", videoId:"1IU-nzFnqCMG1olIHX_re6wgNVQwxyvaX", notesId:"19DmNXSGaYQcNdu2v8D1SNo6oNVmWlgrd"},
+    {num:3, title:"Part 03 (Rescheduled)", videoId:"1sdFzgQcbfDc0oQ8z6uv2kI4yXiSjE6Cj", notesId:"1QP6FYGEvn4_v5omutCcXE_cnUfUWHhsL"},
+    {num:4, title:"Part 04", videoId:"1Yv1POsVQ1tNBYvWGPAwaiTFfqd0BcTBH", notesId:"1KllHozqQuAVTGlAq_pi-6V4jwCOUqTiE"},
+    {num:5, title:"Part 05", videoId:"1x0oTvs116WwZ7vWPBTnBww8U0QGB5lR5", notesId:"11bhdV7JBoOWhnAl6ltYDOf2-dXpmefmB"},
+    {num:6, title:"Part 06", videoId:"1mK1YocxRYpIUB29lg7Jn4RZLGimLbCIN", notesId:"1sd3u9ESecGk7Ayd1PC0m7Ms4a4asoc-n"},
+    {num:7, title:"Part 07", videoId:"1NHPQSqc59nl8YtmVb6oO54cf5R-f6F5f", notesId:"1vwJWjOgzcsyaAcMOf8WSM4y0XDp-y1eP"},
+    {num:8, title:"Part 08", videoId:"1mvCMjuLReFXrwc-ftX7d3rBawkRHCM43", notesId:"1BwEfB_B5l1To7aHo5lg1X2HzaV6B-p2O"},
+    {num:9, title:"Part 09", videoId:"1DZOzSqa0dFqqAXNikDwi_TKImhDIWB5s", notesId:"1vsOW0Y_-S6TirKqWN5VetyBaDfrVijHd"},
+    {num:10,title:"Part 10", videoId:"1Wa5yzng_c0hEYsagIa_9lIVvDvgare0M", notesId:"13xuR2SFHFRGLQvT8LSnw5kE3n0AwUOJe"},
+    {num:11,title:"Part 11", videoId:"1Z8mJmv_mTdzCwvbpsBFONAC1_oAw3hea", notesId:"1IfVqTgshIYRtVNjmoySh-UOZAfnREvqE"},
+    {num:12,title:"Part 12", videoId:"1SKxHblsCIyvGk3cgsd0xmunFp-e93pCT", notesId:"1M_Y-VVnTcvMye1SFHt7zeR1qp9xJOQNM"},
+    {num:13,title:"Part 13", videoId:"1FnBq3ZBpOjshnmjSItEZJGjE-8PSE4JA", notesId:"1zvJViUnR3yU014y_7MQZkZ0Oopx7cXpp"},
+    {num:14,title:"Part 14", videoId:"1ERHWxJb4L6xFUY5wfZqG1-4JY7GV6pv1", notesId:"1B0T5xSdQH2QBDewVZw9wL_sgZyLfe3lz"},
+  ], dppPdfs:[
+    {title:"Combinational Circuit — DPP 01",                  id:"1vAFh66E6Ty82Gyo1JrkwsCJf_cFiHL6C"},
+    {title:"Combinational Circuit — DPP 01 Discussion Notes", id:"1N_Ry0a1Fq9wo9CsHqTBoCxiDbg-x0xcV"},
+  ], dppVideos:["1UO5FWK1HLHCdabF44TRTKvMuH0TbtiaY"]},
+
+  { code:"CH-03", name:"Sequential Circuit", lectures:[
+    {num:1, title:"Part 01", videoId:"1x4zDQaKqn1EHlVgRgnN-TCWVaEJjZq3Q", notesId:"1RXQfw-f1cye4kw6ufLoKteazZGWWzzwE"},
+    {num:2, title:"Part 02", videoId:"13AYmace8uC4jeKmP2Q3yA7BXxNUmmeqi", notesId:"1TgXN79reRkyelXudkYdD9gVOrlLldklH"},
+    {num:3, title:"Part 03", videoId:"1gDgOHaTpBsEggIp66XSwI4-4hiGf1D-p", notesId:"1jxMfex5tS4ettyPsrmxylyHsHCdYSKUJ"},
+    {num:4, title:"Part 04", videoId:"1m2Q_6xq4GDqQCSTlZbr-NpOTaAN13mH3", notesId:"1KEN9oB4ZP9mLrg573ueE6ukfeNHnG8Kr"},
+    {num:5, title:"Part 05", videoId:"1Sh8SURr5oRNvynNnG0_0bAEFlFGiN0ff", notesId:"1HHlytsrBHGtD9EhS8qxFSdPH447r8SSO"},
+    {num:6, title:"Part 06", videoId:"1spb1zzBIyy6_wAMqYpxKIDBA2bg747m_", notesId:"1wYVWPIt1VSAOe4DaqejUrvzfkmWMPyjM"},
+    {num:7, title:"Part 07", videoId:"1brQytEqFRDkKuq1EqQ1tupp4x6VNGCq8", notesId:"1A9kovrJcxIJq00hXG-5eKO1IfBMIK25E"},
+    {num:8, title:"Part 08", videoId:"1QR9KdcB9peToUaiKko2EaziJJIUnxcrN", notesId:"1rhL4F_lgu_UOKWHBckQXzvPVZ22o6FlJ"},
+    {num:9, title:"Part 09", videoId:"1XuqCrz-0u10lYJwBb6jQ5gL2uDCGH32n", notesId:"1iPaiqjz5Hy05FrMhbmX6N89Ml7bUyZ4X"},
+    {num:10,title:"Part 10", videoId:"1OJwUKVZzSrhfGD4CxNk6opv1GOaXm914", notesId:"10XdjnvBU7tzGw1zm1FGaY3D1SKPI34h6"},
+  ], dppPdfs:[
+    {title:"Sequential Circuit — DPP 01",                  id:"1OqwZfwSK_7r5DMPTo51uxoLIkV7FrmI4"},
+    {title:"Sequential Circuit — DPP 01 Discussion Notes", id:"1mCHYHkVAOS7L2r4raiU3pTRQ6-2ty3pq"},
+  ], dppVideos:["1i-4RCJ_XgtdDnqxCROEjKFMjiMQJASrB"]},
+
+  { code:"CH-04", name:"Miscellaneous Topics", lectures:[
+    {num:1,title:"Part 01",              videoId:"15ig5P3bGBdQdzUu5r7iK93B9O74xm7_U", notesId:"1XWv1ArxiClQ3by9AFrqBY-ZHNQdekLnT"},
+    {num:2,title:"Part 02",              videoId:"1wGMjdLb_zCu0oAIR9Jg-oAg7KYqweZwJ", notesId:"1P_jBhDQlJSfqkJU5j1P2kXmvuyjGApn3"},
+    {num:3,title:"Part 03 (Extra Class)",videoId:"1oi0Mr-0mbuYI-98wXM4fy2ws0bRGc0yZ", notesId:"1P1c8QvRSxeciSLLI-lEnx67OTlE7vymR"},
+    {num:4,title:"Part 04 (Extra Class)",videoId:"1GxAZlt_6H6m_DMD8J24s8lZn_9qDLq85", notesId:"108sJ4efjaiiA4pMW9i0AgKqa7HeW9Kts"},
+    {num:5,title:"Part 05 (Extra Class)",videoId:"1kRzsnnnrQuYeAQY2lQwv1j6aJEEBxpuw", notesId:"1c9FLznWaxYfkT4arwpMvV80mVMmx6LhX"},
+    {num:6,title:"Part 06 (Extra Class)",videoId:"1eIVt8KjgSIu_rFG3CnNVJmqEF5OGsFbm", notesId:"1ZUdQ4fOilfsxBGdDaJsNiY1desd4dZNE"},
+    {num:7,title:"Part 07 (Extra Class)",videoId:"1aLkOVQ8UPjWNuQQDifNUN7ayAB2nmHtZ", notesId:"1wLUC3SNWKzbwzZkJQLtWY6pEUyJjdNMT"},
+    {num:8,title:"Part 08 (Extra Class)",videoId:"14qCE3zEsB3T69pI5nYZb58n8mkoLhQFH", notesId:"14K1-REKX1GfUtIEdSExm1AqvyNO8Tatp"},
+  ], dppPdfs:[], dppVideos:[]},
+];}
+
+// ════════════════════════════════════
+// DISCRETE MATHEMATICS DATA
+// ════════════════════════════════════
+function getDMChapters() { return [
+  { code:"CH-01", name:"Set Theory and Algebra", lectures:[
+    {num:1, title:"Part 01 (Rescheduled)", videoId:"1opoFhDIWljlXOhJWWEA-EiShG8LgVW0B", notesId:"1uOpJN1PmDuE-gmvUnw0WhbvOlAD22ohH"},
+    {num:2, title:"Part 02 (Rescheduled)", videoId:"1Re7a7x_ZKHJfT4oDu2MOSDOx-C1OqZfq", notesId:"1mLCi9DneFAckYydW8Jxc4J9kDlimuI_5"},
+    {num:3, title:"Part 03", videoId:"1Smq-i3qXz84tP7rstWj9Oszd-E_nfdNM", notesId:"19xt7dqEc0aJJGkloqTOPxKdF2Fv13Crm"},
+    {num:4, title:"Part 04", videoId:"17QBI-jfrGjF5JvyJQScSBktC_b9XO2UY", notesId:"14Z-_NC3_dgvrqInIbotbZjmV3h_a0J48"},
+    {num:5, title:"Part 05", videoId:"17VBSJXgGYG3twyKADiRhTQKr89cQBWYf", notesId:"1pIxwJqKGfeiJsUbfeF9sWBTr9HuxBMMp"},
+    {num:6, title:"Part 06", videoId:"1kmGwaBONduIU-xJL39SlC_Pti-nwx_jA", notesId:"1h4RftHaWXLmwPj6hWoAkKjPifZfE3WNZ"},
+    {num:7, title:"Part 07", videoId:"1AD0RxFOJeoXsQ4HjQjIPXySMSyVG7bfN", notesId:"10rtlOLwPkGk4nSWXB9BZWjZIdZu_z1KM"},
+    {num:8, title:"Part 08", videoId:"1hWjTM9HS1MTSn6RwBhcodw-LrIu2OUT0", notesId:"1xU3tY7WDfbAf3omIgZ6P2HQnIsiUYygo"},
+    {num:9, title:"Part 09", videoId:"16FxXhgEpnR43fDgiKniksiZ0zdIhauSV", notesId:"1wOAs5wh-1iDXz3pwsGTMA4g2yl2cnDKG"},
+    {num:10,title:"Part 10", videoId:"1SxhC6eYy1nRQwIE7MRgxWtH5JitVsNJH", notesId:"1JbhUk5kgZ23_UXBvella921dyf31eqCv"},
+    {num:11,title:"Part 11", videoId:"1DuI7DrouR5b2_NvCK422kIHDRLDzWQBH", notesId:"1NLqrPBJOacE-Euvh-V8VDCc_YRYyLzxg"},
+    {num:12,title:"Part 12", videoId:"1PEKsvN33x3WsgsmL50NS9t9u3uVctK98", notesId:"1W5csSAiQJOqHY07epaqn7gSFAXFZ2KIJ"},
+    {num:13,title:"Part 13", videoId:"1AWdl3im6rrJDYQBVY9wEzAGz1t2_KxJe", notesId:"1PiECZqSWaD-pTv9QK44ST0ZMNRRrG7q9"},
+    {num:14,title:"Part 14", videoId:"1Ll5jZWMmGz7-U5pLBaF6rvx3gR3qPHtL", notesId:"1zxFY9jHxijL2cXLpAXJyRWRLsDAluKm1"},
+    {num:15,title:"Part 15", videoId:"1k25xNUfCnctEr91jhehHC5ta3qedbrlc", notesId:"1Grd7guF8OoEML48EIRUUDJvsNrirIHM4"},
+    {num:16,title:"Part 16", videoId:"1-xwgFyr4iktdwZCLVrUHRG3M3r3sgdLi", notesId:"1MLrW3pCEb9ymXU64SycsGnDnvVkBWpW1"},
+    {num:17,title:"Part 17", videoId:"1ahQ92AFqF1dOeUQpdJ3BGTvQV06ow6Ic", notesId:"1UJ6sMXuoUzg0BV2rfuNzfsfugWOHRbNr"},
+    {num:18,title:"Part 18", videoId:"1-rn3RB8J7j8fEDoyFPIUm0FE5Hm-_2VO", notesId:"1eoXdN6HcPyYFANY6XWuS7II4g4LylxGE"},
+    {num:19,title:"Part 19", videoId:"1QEO8c5MOw7vQ7FsS-k1eKPaEg-qdqSeX", notesId:"1NqyCb2FD562TUg2pcjT_IIbgH4LFsFsj"},
+    {num:20,title:"Part 20", videoId:"1S1_NNNI2pOsNgXE47TNxiM837wRopIID", notesId:"1XK7BpFKclVa0_F-K6raGYYqknBgta7TZ"},
+    {num:21,title:"Part 21", videoId:"19geO_4411IcJtJ-801TCS60K8dYWawey", notesId:"1VCJTfAdtcwEOyQIG4bh1D4u2DV2DKMaz"},
+    {num:22,title:"Part 22 (Rescheduled)", videoId:"1bmAABcfpeXqMHzbQewRQNiBc_XEuuDeD", notesId:"1EC2xYwFtyg2Pr45xCuFNpW_uLrdTqZ3M"},
+    {num:23,title:"Part 23", videoId:"19Cyfj42j4QIbusbuHB8-bEELq8_NwQv9", notesId:"1qovghk1VBTP0j-FNcpqQdY4LI_mFthjm"},
+    {num:24,title:"Part 24", videoId:"1FqjpCzzkT_hYozTEdIBjnbVGELN5SwIr", notesId:"1fdtcZM0F43eOigldKcSIsG-vAOzKFWGV"},
+  ], dppPdfs:[
+    {title:"Set Theory — DPP 01",                  id:"1P9r25Muar3PdwHBv7Ls77Kotqgc9Lb5r"},
+    {title:"Set Theory — DPP 01 Discussion Notes", id:"1TDzn2gdXtwKx1WZu7NFPMKaZH1ao1wd_"},
+    {title:"Set Theory — DPP 02",                  id:"14F8h-dtu7bforQl7GxLwV6QwFm3VapQ7"},
+    {title:"Set Theory — DPP 02 Discussion Notes", id:"1I5TxlAymZDOgUUVYn13uDypgfmoN_lNv"},
+    {title:"Set Theory — DPP 03",                  id:"18XQqmvpGIA6tHEE9mZpYseAUY2dHBFGL"},
+    {title:"Set Theory — DPP 03 Discussion Notes", id:"1YQqNcJt3zcC5d37f84tcBXRibhTg2k6o"},
+    {title:"Set Theory — DPP 04",                  id:"1Uxo7cxP3JGZQiDhuz1iJyKGUq5zVRxOS"},
+    {title:"Set Theory — DPP 04 Discussion Notes", id:"1VHHd2QwU2yFweIIPdEngp-0TO0zmsp8N"},
+    {title:"Set Theory — DPP 05",                  id:"1klGPPnw25kQJ1Jw4sEqXG4i9c8XKyPPk"},
+    {title:"Set Theory — DPP 05 Discussion Notes", id:"19e4hgW1qv9ulQPvHWSsAfECrmyOj_INa"},
+    {title:"Set Theory — DPP 06",                  id:"1WsxLyMkBuVwaEdQ4T1NkiAPwNCYUp1p9"},
+    {title:"Set Theory — DPP 06 Discussion Notes", id:"1cJ3YWsoTUdqxI7SfNoyUIZ2PPZl9c0aF"},
+  ], dppVideos:["1yhfHLRFPI52ykLulWrg3sddHMnaD-vdu","1LH78ICGV3dzqMrDGYKx3ENwEW0UioPyt","1_jTOAgLCNiSrjrMkKuyb4AHQrJVWtPO9","1RxW9f6OO-av3E9lNO-X6PR7RLRTqkpia","152RdPsHt2ma9HaudHWk_KZO1Vnn3Bg1E","1J_-8v8dewVpn02Hjhdos2fYHVejFt2BA"]},
+
+  { code:"CH-02", name:"Graph Theory", lectures:[
+    {num:1, title:"Part 01", videoId:"1ZLcwsJkzgItagg8ek0jftEs4UZmxrISW", notesId:"1-RpqBnKJ2SZfv47chnSiuI6ua98xuwg9"},
+    {num:2, title:"Part 02", videoId:"175mSLjOUOih4FRbYoMm1jmASsyMIXP8O", notesId:"1rr0P6fiMA_8sE6yn51ZUAtZHuga-rgMY"},
+    {num:3, title:"Part 03 (Rescheduled)", videoId:"1K10p1MSWVLojNfo7SUrHdO8UpBK0A200", notesId:"1ef9yf79R6lgnCz7m_T6YeAS1wOVNTWzX"},
+    {num:4, title:"Part 04", videoId:"1fdoGO-H0xoo2Y-hxQN1XKx1SV_bzDaZE", notesId:"1FcNZf-7y8fNRifD2uif-l2J4ZTfy6gSy"},
+    {num:5, title:"Part 05", videoId:"1n4T64Lqm2zYfpz3xlBa0w-dpiMeoEB4m", notesId:"11RDXo80zQB37egNSmz7ouMTDr8-QlNeS"},
+    {num:6, title:"Part 06", videoId:"1sOabIOZHXHZuVLouRVdMHQj_s7YfQ7eB", notesId:"1PVwjl3eCaXYAo4CmhRMx-K0T6N-NQuET"},
+    {num:7, title:"Part 07", videoId:"1eFXr8wVhmKYgVWwyDgpMh0OzJHgpfwXd", notesId:"1x0KgV9kdq0p1slHddPcWJZ3pDNcmFg6A"},
+    {num:8, title:"Part 08", videoId:"1QJ8DvdJvVV-ryhOZ5EKLvvyCLATdQwWT", notesId:"1gkvuP1U-JWLoK44H5eonjMu1k1Gcr9QE"},
+    {num:9, title:"Part 09", videoId:"1Vgx57RQ0IjE8DNvUK7JFigpu0KJtZAJe", notesId:"1zhLQI3fqW2KnCCJpXCs8DnwuYGtrVwvd"},
+    {num:10,title:"Part 10", videoId:"1kgFV7kwSg1FtA50LpFNBOj5A3b5eD1LP", notesId:"1oULzCi18LwOIiPrKQy1gMfyDy99ji4Jl"},
+    {num:11,title:"Part 11", videoId:"1rRL6gy2bpwZssPmbpngkRlPuD0fBmuvz", notesId:"1ByoAamqoWAcCqeX23rVYm4UkhQHNrxQ1"},
+    {num:12,title:"Part 12", videoId:"1DXIfBMlFOkI73B-8v0r_xV6k4giK_Tqh", notesId:"1R4W4i6YfV0uTn62DOvQRzkG9dlCTloOv"},
+  ], dppPdfs:[
+    {title:"Graph Theory — DPP 01",                  id:"1oeSzArtse8Rxjxcs7ePUQXEDyk3j09YR"},
+    {title:"Graph Theory — DPP 01 Discussion Notes", id:"1cgPrb3O6qb9SUSDBKqdsaLFl6XJ2ePFe"},
+    {title:"Graph Theory — DPP 02",                  id:"1IfyqEt31Vxa-Ff5JALmuIIIW_huGPzqP"},
+    {title:"Graph Theory — DPP 02 Discussion Notes", id:"1xxCFWBAHSn7nFuF8bTmQgH5OYkEBEqRt"},
+    {title:"Graph Theory — DPP 03",                  id:"1SjaJg_w_iGIoeiaEvPVasxeINJE36KoS"},
+    {title:"Graph Theory — DPP 03 Discussion Notes", id:"1bjzJfVD4eIBQ0gtOdzTaKnhkdOijwZT4"},
+  ], dppVideos:["1DOWu4LdI-1qrr6oCVQYeRdeNJyPasZVi","1Xx1-DGDabOBZlPhJmCJBHH8jenQwBriT","1vabmII52sgjwsWrKuy9N488K5gmY4gNV"]},
+
+  { code:"CH-03", name:"Mathematical Logic", lectures:[
+    {num:1,title:"Part 01 (Rescheduled)", videoId:"1Lmu5SdkIg8Cy0e-gRP_FxRCEPlv4WuM_", notesId:"1kwzw77fBaSD4dhrQUUR1W8AZM4oWeHl6"},
+    {num:2,title:"Part 02",               videoId:"165lVJlZSKDPjElbcXojjv7TBUBTDzQXG", notesId:"1gVjNeKgBs55Koj56_T0Eka7Nh4qdjIFX"},
+    {num:3,title:"Part 03",               videoId:"1Ag0ytashtj4bYJT3FQoGcBXoHDQ1bqpm", notesId:"1cA8a6a_6kZ9JYD8ZpsKbUFVKtriBuKNW"},
+    {num:4,title:"Part 04",               videoId:"1Vnaesk49sqf63Xq4IPVKHGu1YM-7x1mf", notesId:"1MLkXV6lFgFPXQUZrBQJ9GjMdsk8t1s8b"},
+    {num:5,title:"Part 05",               videoId:"1xBbSnZmyCdBqKc0Qk38ezEBfWYJ3DgL3", notesId:"1igdrKEPodAhiOpGkTa6pRNob__ZaH5Jb"},
+    {num:6,title:"Part 06 (Extra Class)", videoId:"1Z1knE61U-fLL7Qb_V8Yiwt2pWVgyWcPD", notesId:"12SSPZx445Ubhk5jMjLGLJlDEuno8tB70"},
+    {num:7,title:"Part 07",               videoId:"1FAsGY3ciNS9WtXg7SRtTKacENifFAJ7a", notesId:"1Zm70MMOmfWDfFIPCgOtUlrm7CwxTpngP"},
+    {num:8,title:"Part 08",               videoId:"1luvlzdtLEutRsLUaha3vM8HG5TJNPX7z", notesId:"1_-QUDHWkoNNhYJj8NRAdHp3njSy1Mkxl"},
+  ], dppPdfs:[
+    {title:"Mathematical Logic — DPP 01",                  id:"1Thq54ai9E0cMiCeBrfKGwidWRz2aw3Bl"},
+    {title:"Mathematical Logic — DPP 01 Discussion Notes", id:"1onvVmw3-K_h1UKLAojKNYY4mMukZyfoG"},
+  ], dppVideos:["1QzLrio4c4SslFy-gZaJ1Ju0nSNyVtVP1"]},
+
+  { code:"CH-04", name:"Combinatorics", lectures:[
+    {num:1,title:"Part 01 (Recorded)", videoId:"1WrzfgyYyPf7yr6mV7jah9fEnhrO4K4tS", notesId:"1-mo7B8DXG9LGrR4k7XWJD_ToQ7MdJ5F6"},
+    {num:2,title:"Part 02 (Recorded)", videoId:"1Qx0scbjMELixUH3j0sV_OOxvcnV3ReSH", notesId:"1Izj3eoaLKBhrcEJYfaIGqTkstYS288g-"},
+    {num:3,title:"Part 03 (Recorded)", videoId:"1aQ_NxpSTJjj8uG8s6VMXxfZRFRZ_lzQ_", notesId:"1Vegsu8WNaUSY0NU59BrF6ZwKWVZSONgU"},
+  ], dppPdfs:[
+    {title:"Combinatorics — DPP 01 Discussion Notes", id:"12A6ibefJ9INTVS1jPxaTvOQlYeKdVyjY"},
+  ], dppVideos:["1tgg1k6CznF1r455wvbAl1ekGWZeE471n"]},
+];}
+
+// ════════════════════════════════════
+// LINEAR ALGEBRA DATA
+// ════════════════════════════════════
+function getLAChapters() { return [
+  { code:"CH-01", name:"Basics of Determinants", lectures:[
+    {num:1,title:"Part 01", videoId:"1vRIVYTcyiWp7fJspHtR2sdJazUJiYHTF", notesId:"14Kb4zBD6DHk_mgXtyJhZyGwaiGpQ3aiL"},
+    {num:2,title:"Part 02", videoId:"1AFcFJJaZu38jYals5cFj2MrDNNIkr0ky", notesId:"1CTXaIHcKEyf4V48YlQm71x583YzRBW6H"},
+  ], dppPdfs:[
+    {title:"Linear Algebra — DPP 01",                  id:"1TeFFW4fLVnYU6frTBUyHbiRN_C91HvMu"},
+    {title:"Linear Algebra — DPP 01 Discussion Notes", id:"1e8VIpUI9ZhrF6pzQTh_OfPo_xq28hKy9"},
+  ], dppVideos:["1vQ69R1K3udfi-tDwZ97hjza2sPC-YsUU"]},
+
+  { code:"CH-02", name:"Algebra of Matrices", lectures:[
+    {num:1,title:"Part 01", videoId:"13yg5zpTONMocF3AnJaJshyJjrK2cD0ts", notesId:"1uB-VKf-pqMiFqtlNctqWPz2Aro5MDxZt"},
+    {num:2,title:"Part 02", videoId:"1bIltltrA6SJNCPoYIbaGRAjUKF2O9bcA", notesId:"19N1g_MTyzo6t08mFmcOjVi_PSBtiW8AU"},
+  ], dppPdfs:[], dppVideos:[]},
+
+  { code:"CH-03", name:"Rank of Matrix", lectures:[
+    {num:1,title:"Part 01", videoId:"1kn7Uiw0_Zvq8vQaIlj9mHrYgSuCcRR4Q", notesId:"1_OPIM2WQf7UCAWlhSmcfdtijpxM_BIX2"},
+    {num:2,title:"Part 02", videoId:"1dM75GrasP-KBaJo73dcXBE6YBcIeJLNy", notesId:"1ikonzR7rowlgT5yvikLSS6A8JJNAlkrC"},
+  ], dppPdfs:[
+    {title:"Linear Algebra — DPP 02",                  id:"1uiwbAz686JY_hbqPuLkTwZ40loTx9JTn"},
+    {title:"Linear Algebra — DPP 02 Discussion Notes", id:"1ycGfkLHlwU7dImYJLuUgsNafoT6FaDrG"},
+  ], dppVideos:["1RPsVQOXkkyjauIf-MUTzhid97DMAKxXp"]},
+
+  { code:"CH-04", name:"System of Equations", lectures:[
+    {num:1,title:"Part 01", videoId:"1ViXbXbC8IDLt80JgJ7TbrT1x7StHleKl", notesId:"1qPEVW4QBW85qBG_h4cUUQlaCxT0g-sic"},
+    {num:2,title:"Part 02", videoId:"1imAyD_ZdJqfsQwjkrO7ZL2NuOoEYHSYm", notesId:"1UkFqedKAAo3lSQr0dpAuwAJoS1hJ76PY"},
+  ], dppPdfs:[], dppVideos:[]},
+
+  { code:"CH-05", name:"Eigen Values and CHT", lectures:[
+    {num:1,title:"Part 01", videoId:"1TUskb8aZ_MJEiNYfEOhb59y2Vb641A0x", notesId:"183pV1IpYmIQK26jE82iG4Yn3Uj_SjqJF"},
+    {num:2,title:"Part 02", videoId:"1HL-FWU_JtjxGsHBz4hViRMeQ3G8iy0fD", notesId:"1Jg2yjRg9H-D4NSbTeF6AcyE_Xa120sXk"},
+    {num:3,title:"Part 03", videoId:"1mu0amdbFwEn_d9R6McZ44n1Yf19Bd9-k", notesId:"1bwrn5wNuhSd0qEPNsk5a50zjBtdOrije"},
+  ], dppPdfs:[
+    {title:"Linear Algebra — DPP 03",                  id:"1TT0oen630P0w96v8_P7n1u0Y2jOSzDst"},
+    {title:"Linear Algebra — DPP 03 Discussion Notes", id:"12g_OhiCAonXS8CuHVOnCH1Swc8FjpTOT"},
+  ], dppVideos:["10bVyLVovvRULEiHa6rBe8ouaQ8oU8j_U"]},
+
+  { code:"CH-06", name:"Eigen Vectors and Diagonalisation", lectures:[
+    {num:1,title:"Part 01",              videoId:"13htkhiS7MfkP12vSPq-MzNkxvlIhPEhm", notesId:"1yl1AAfMHkwWYh4kWGDkuh3IAsrbZ_1EC"},
+    {num:2,title:"Part 02 (Extra Class)",videoId:"16eAzC68o9sNhL5ny2YLa8Yui2HCwcDTj", notesId:"1x2G6JhCvkhe7om07k9OQZrdNCn4mrN8T"},
+  ], dppPdfs:[], dppVideos:[]},
+];}
+
+
+function getDBMSChapters() { return [
+  { code:"CH-01", name:"Relational Model & Normal Forms", lectures:[
+    {num:1, title:"Part 01", videoId:"1oCyz6m75l0kfbIi_TyAm9lVwRIux0iH9", notesId:"1Hd3eItyzej_9zeZZCP37rsgDV9Makv8s"},
+    {num:2, title:"Part 02", videoId:"1e_zpQ01Poku7uQnsZaxwV1mEE4MmjE2I", notesId:"1IdyZcTCUZgoFtt9-uRxk_F-xj8iMEoBm"},
+    {num:3, title:"Part 03", videoId:"1BOWkRxEoJwr7K07INY9UpVrfB2YabPL3", notesId:"1DFbzrVz2z2N1jLdeVbbYboNRf6t0EwJI"},
+    {num:4, title:"Part 04", videoId:"1Jzfz42Xjj79d4Ua0XP9CAcBNq1Ng1no_", notesId:"1KhTfWSCUZeNsuKECMJXJaK5Q9jai3Qtg"},
+    {num:5, title:"Part 05", videoId:"1NWANu74o-ADOTsZkc684oRa3leg4tmeU", notesId:"13Ofks7UFIM6fQ3EUhWpKdWRKUK3Qks9R"},
+    {num:6, title:"Part 06", videoId:"10CjB7GdjZcXbOOz03PU53M4Pvd_kKSEC", notesId:"1721wALkImqZS2Q6DwoZ66pgimvOYmWY7"},
+    {num:7, title:"Part 07", videoId:"1Li_PsvI2vztWKzQ-NGCW3bzHDkXdk2gL", notesId:"1dXebUQ6ILXf9l4oMrrXAHJani_b0p0bN"},
+    {num:8, title:"Part 08", videoId:"1PCO0SIopb0L1lSZlW6QNR0eD0zxvwPVJ", notesId:"1ej6zEKYipqVKcLsHHQSr9QJDBcZe2Q40"},
+    {num:9, title:"Part 09", videoId:"1huybuNg_cP-93U5DWRsD0lc1_7EnVFSO", notesId:"1fd9cAAAdcWM0D9vwC1gsOCp9nT9snl8E"},
+    {num:10,title:"Part 10", videoId:"1NC-A9B7DT-OaiIAJdZCv7JW8hVxrRAUU", notesId:"1ylVI-ZnxemaLXwwwYL7GGLxqtcrkWBz7"},
+    {num:11,title:"Part 11", videoId:"1AROy7gkMXhUYaU_dBZqIRw6Kp2Iy6EJ_", notesId:"1R3T1C5a2P3I-VNVd3yw01zVymzr5mG_K"},
+    {num:12,title:"Part 12", videoId:"1kaTkxl0xZhtCG1mR63GgpYaus83Ekn41", notesId:"1uI-eH-BLb0A9fOZLKhCgHp7eZPJSDdBp"},
+    {num:13,title:"Part 13", videoId:"18eLOq6BYGHrqPSivpnGOE2QdO8qSJuN0", notesId:"13lFDG_6q1abj7vx7xIadmT2X3eCQk6sF"},
+    {num:14,title:"Part 14", videoId:"14HD2Wuwfb2KYUHFIGnt7CeB2gkVXtVC5", notesId:"11bDtGfFvSxLk-3MRapEZqA6yBNsEUrVY"},
+    {num:15,title:"Part 15", videoId:"1o45ZsHAAVp17aau6f9K3r8sD54SnDScv", notesId:"1wlQPaFZVirZxaJWTq7kRn0_JRDVTkpWr"},
+    {num:16,title:"Part 16", videoId:"1w7EU1yS8fSeWzGq_vsmOy4i-QdHP810d", notesId:"1eqyE3jd4WJnwjZBXiRDv-L8-2EcblyB8"},
+    {num:17,title:"Part 17", videoId:"1ijYNOOzC6YPlZ_QA8qugGiRKP7UEwAI4", notesId:"1OjTEPgzjyWqbA3ZX0tufIgenn5-WhzT_"},
+  ], dppPdfs:[
+    {title:"Relational Model — DPP 01",                  id:"1lKZ9hqvqfgoKUTtBhjDYN3-1xtXY-lxk"},
+    {title:"Relational Model — DPP 01 Discussion Notes", id:"1cf-4a0yTXn168J8-uivEUNoZeEEv5QRq"},
+    {title:"Relational Model — DPP 02",                  id:"12OC_kOSg2RXT_5IE8S7e80JHNuyEOqg6"},
+    {title:"Relational Model — DPP 02 Discussion Notes", id:"1K8drxvDNN71B7gSq9PLEbthuA29gRqjK"},
+    {title:"Relational Model — DPP 03",                  id:"1jmcYKdH5x-xRtNdqswWjHDuYbQWMYZje"},
+    {title:"Relational Model — DPP 03 Discussion Notes", id:"1lNmdAzv_UdNHs_v5WNkaUIGPJJN_bE3l"},
+  ], dppVideos:["1PiRZEriQojLYl8FE8FAYaNukS_aXDxK7","1nWlPX3CXkMkNiIQTDpRxa-R80z_FUel9","10Oe-lmAaTdbAqqzNLHY5O7nAiZeYiPdk"]},
+
+  { code:"CH-02", name:"Query Languages", lectures:[
+    {num:1, title:"Part 01", videoId:"1DaR1CERkDrT7_p3vMJi80J7YSuksizZm", notesId:"1RQBmgSA-PJKPcfZnmslATAZnCCwoWMhC"},
+    {num:2, title:"Part 02", videoId:"1w-QM4elnBjP3e9I46dhOKWJfySmQ322S", notesId:"13oI9ciRQK-yUSu5vWprYcJ3V_GnM2MOp"},
+    {num:3, title:"Part 03", videoId:"1CBDFQJukY5Z-_k9qo3yBwG1bBzGLvA0W", notesId:"1UaVOpBZjZWLNfZM-5M4sBr0ahFCVVL1l"},
+    {num:4, title:"Part 04", videoId:"16QmeBf0qjyJwD6_BKdWR2WdZevPiceAW", notesId:"1kBowuyOHJDcJf3Ljs0Qp8mosWcnT76Ka"},
+    {num:5, title:"Part 05", videoId:"1cqBvsfMc_agL7jfuXZMUZA7XYg6AzSuO", notesId:"1xcFFohYk5TnpVubBaS8_8A4GNcQg2WQz"},
+    {num:6, title:"Part 06", videoId:"1z3DyuzfIUXtMru5bexXIIAorsxYJfG0a", notesId:"1H_UB5mPMNTv6GKCi7oXilyCvJINhydvO"},
+    {num:7, title:"Part 07 (Extra Class)", videoId:"177RtOD-Mu3-uLPMbSJPHz8wD4zlSb9PI", notesId:"1RozTYsUKuoVKP_tBdwbFgj2cQOiop3OW"},
+    {num:8, title:"Part 08", videoId:"12quCD6_B3E333KVEzO2trnCnC354MnhU", notesId:"1BHNxNMNfFy_JrkBBs_YZLX7QH0Kfedoa"},
+    {num:9, title:"Part 09", videoId:"1yDVRro8QUqet-FLEOwCgjK8GziaylycL", notesId:"12zCoXE9mo3jf8NaK8GJhuPrhGkYSqWZX"},
+    {num:10,title:"Part 10", videoId:"1ScRhrYVOt3H6KrSiNhM3GqQtRo3dPW8i", notesId:"1LZXbYIPTnv6ERUK5ixNBHw_JRoul00-a"},
+    {num:11,title:"Part 11", videoId:"1DEbSCegWuURnDzdyXDhFsUnB_lbQ8M9x", notesId:"1VhC7ZFWwxDLp4ldKj7G9-6Y3r5r32A3d"},
+    {num:12,title:"Part 12", videoId:"1wWQB5Om5Cnie5O8BXb6xjpBiaB4zOk1f", notesId:"1YO4z4zMD-k54tJl3yFOOoG0BsaPozm2r"},
+  ], dppPdfs:[
+    {title:"Query Languages — DPP 01",                  id:"1g-FitK30MiPdoWgq1dYPKv-AEdDSeLo2"},
+    {title:"Query Languages — DPP 01 Discussion Notes", id:"1huotcErjTqru_uCw8PdabSfXLXRVqOQy"},
+    {title:"Query Languages — DPP 02",                  id:"1PF3RNqYtC5kugGwgUttj9YMba8M3Xuxg"},
+    {title:"Query Languages — DPP 02 Discussion Notes", id:"1DRpkQewsU0A3ADV6f6dres-qeCow6sW4"},
+    {title:"Query Languages — DPP 03",                  id:"1qZOfvUYw4uM3itP0_xKUOryMDwa3viDf"},
+    {title:"Query Languages — DPP 03 Discussion Notes", id:"1Qx0pLT_qWhy5gDFf_yfmF3x8s8uwpf9q"},
+  ], dppVideos:["1A-1xGMKfh9ozmDbn87J0CrorOyY1umcP","1_TOyWrVsscmCNqSYrNu8dc0rbkOxHTuC","13Bofk1ClGLA_LGFULGe7sR2NAvPKqtdE"]},
+
+  { code:"CH-03", name:"Transaction & Concurrency Control", lectures:[
+    {num:1, title:"Part 01", videoId:"1aJHgNpPqdjux3UmO-mxJEsw4CdKoyS5H", notesId:"1wQ2GECIjC7HsRAc4NmD1HKXvTpjTor71"},
+    {num:2, title:"Part 02", videoId:"1YPqgFYAT95gc8kLSKweahNW4xXCCs1ca", notesId:"1Voymtl5rYCHcMJW_Mq7Ez_G_EtreuvDo"},
+    {num:3, title:"Part 03", videoId:"1pNq5WHRYvte8WM8GoJlkS8TO9MRyxeZF", notesId:"1ctoIWuL1XkBnbyg9v6ea5WfBdPqwiK3_"},
+    {num:4, title:"Part 04", videoId:"1acZt5RsAWKzHu0gBAlQoogFQeOCujZQX", notesId:"14aFh9DcylB48rk7dz2O-dQz7ljLmEH6h"},
+    {num:5, title:"Part 05", videoId:"1DmFgpTDt8pp_jS-5-Zqov3UcorDM5LA-", notesId:"1TpIG27lCJTOCQUksBOT_ewyEHP1fs4q7"},
+    {num:6, title:"Part 06", videoId:"1YgVuxKOiwweV3QAO_c2-568bspX0k2U6", notesId:"1Fo6anlkYK3G8kZf_t79K_YfSZB9VQPDd"},
+    {num:7, title:"Part 07 (Rescheduled)", videoId:"1WbB2do14Q7yhW-ZI3wiw1pxfaztPToa3", notesId:"1IvB86IJfPFfsKy3sHtn43z6Oe-G4B2Ck"},
+    {num:8, title:"Part 08", videoId:"1qaoh75GhJPd7bNWoYhgD-GuNV-vgcU1F", notesId:"1YhD80twgJH3OPxypjumKPNtDeYJXEaWl"},
+    {num:9, title:"Part 09", videoId:"1_C6DH2TLxQJJitZE0QoZZ8zau7QDe0xA", notesId:"1Q0nDLbkM4piXKtWYlAqgDvJbEX3BC60F"},
+    {num:10,title:"Part 10", videoId:"1faOA4cR8e4pJqUJLBNzcQcNNu1V6aEXn", notesId:"14VW-iYKZ6k4kncPzo39z-MGYoKQV08Bb"},
+    {num:11,title:"Part 11 (Rescheduled)", videoId:"1qtAD4sEu58wy23Xy-YIcduBXdJUt8mLQ", notesId:"1Jew5ONeJsMIxpUgn0_tuf5n8DTN0LIsE"},
+    {num:12,title:"Part 12 (Rescheduled)", videoId:"1xHnCyyiHuciZ_V_rW8Vanrdh6zGCKFae", notesId:"12UN8s-VHB670672OVtoG5Da5kjlGt8MZ"},
+    {num:13,title:"Part 13 (Rescheduled)", videoId:"1hLUqyk9ZUVGHe0Xo4jSCBqjJHpw0JiYw", notesId:"1XQI7x6Hod8loObWV_z8GWnT_5zxmY8oz"},
+  ], dppPdfs:[
+    {title:"Transaction — DPP 01",                  id:"1cT7PDUUlszr7ToWO-jDpE6_1AfM5EK9s"},
+    {title:"Transaction — DPP 01 Discussion Notes", id:"1WmClMs0gJcQuhy0J7g1O2erSgsO_W6fX"},
+    {title:"Transaction — DPP 02",                  id:"1bLxSh57b2RZvfv_vihW1OK3IOeGIw6Y_"},
+    {title:"Transaction — DPP 02 Discussion Notes", id:"1Q79IgTLHzdL1vQHNJcHYr19vBUxdtup5"},
+  ], dppVideos:["1-KcqUd0atZextuYHXuG1dpvzTKNXLfhj","1rdX5Iav3j8usa_TJbgrxiuTUBkF_VTP-"]},
+
+  { code:"CH-04", name:"File Organization & Indexing", lectures:[
+    {num:1,title:"Part 01 (Rescheduled)", videoId:"1wQ96V0RdGAD-6BlILf8T4OjQqzvsWUU1", notesId:"1Abi_FccC0VLgQmtQTAnwhHW2fejowjSe"},
+    {num:2,title:"Part 02 (Rescheduled)", videoId:"1Cc3bWKwJdnN36iee3UQXFpwOq2ew2qbt", notesId:"13j4PnFSZAqevx9QPScicISDXdofvnCdZ"},
+    {num:3,title:"Part 03",               videoId:"1HYaiqHJihn0MNGJ4ms5B_nP-L7_Q3OZv", notesId:"1wD40vziamwsrdoie3eqMB3tZ0H7e2bG4"},
+    {num:4,title:"Part 04",               videoId:"1ZEQMpzTrqE-P9imz1EgPFXZ5Hb3fUd1B", notesId:"1oN-qihxMXJgzrShSg3yj3vtJMs2YtRWz"},
+    {num:5,title:"Part 05",               videoId:"1k-Fkj3ObwoSQXIP8Zrm-KwpnFjAfBrc4", notesId:"1WzWZIjA0d4ExXia--2UHigyt2STmoUwW"},
+    {num:6,title:"Part 06",               videoId:"1xe_xTjH5M0kGhBE4kWQ20iR9h7TkErjC", notesId:"1UCkvTKaVD76BM5IJZtBuof6q3FlC0hPA"},
+    {num:7,title:"Part 07 (Rescheduled)", videoId:"1U0TIAqRKQ1qZFobh75VCNSItyocoIsMs", notesId:"18GHvmAWZzgIXr7xog2db1znAiioGfQzB"},
+  ], dppPdfs:[], dppVideos:[]},
+
+  { code:"CH-05", name:"B Tree & B+ Tree", lectures:[
+    {num:1,title:"B Tree Part 01 (Rescheduled)", videoId:"13n1j0MbAuSLtmRxcziGVLtTIZlJGujgY", notesId:"13DGIX6EBWiVgnEwziTsDPD4eudLQNGFi"},
+    {num:2,title:"B Tree Part 02",               videoId:"1fq6FAincgx8iXNIfHQZ1gsXO7ISoRBeJ", notesId:"12XVWqC12XWCH-RE-eZsMe0LpWBerFOtb"},
+  ], dppPdfs:[
+    {title:"B Tree — DPP 01",                  id:"1Ois5YY-PGp-CBX2Z6CdbrSXwz73h9TUx"},
+    {title:"B Tree — DPP 01 Discussion Notes", id:"14ncl2YbFhQHDO7fxEtvTHBGMhJKxdQoB"},
+  ], dppVideos:["11oHBsuRoBEcY9_6LOaTeoTlE6MO-sIKI"]},
+
+  { code:"CH-06", name:"ER Model", lectures:[
+    {num:1,title:"ER Model Part 01", videoId:"14GH0X5Dt_YiHbFY2fpu89joSiOalMnJZ", notesId:"1szDyDmEVU9kiDFTpttDdjhsXW7vf-tI_"},
+    {num:2,title:"ER Model Part 02", videoId:"1l3E09rJOstIHMQUl-lOA5xGiR6o7HwYF", notesId:"1iahR7HMjpodFT_C-0Sb-pmeURNy8yQW9"},
+  ], dppPdfs:[], dppVideos:[]},
+
+  { code:"CH-07", name:"Conversion from ER Model to Relational Model", lectures:[
+    {num:1,title:"Part 01 (Rescheduled)", videoId:"1G7GDJ0bpX7FSw9UlWeR9RmALwJofTt_6", notesId:"1sJKKG_AsK-Cq1NIKyngIHsqDq4nIl6qi"},
+    {num:2,title:"Part 02 (Rescheduled)", videoId:"1LUdEEXoxhFT7xfvPC-beuRF_smDaQ0Ra", notesId:"1tWHI7ia1PqCWqe168Jwm0U0eKK-QWhrn"},
+  ], dppPdfs:[
+    {title:"ER Model Conversion — DPP 01",                  id:"1LWLffNag8gVAtinGtUT6EpHNiHEfoMeF"},
+    {title:"ER Model Conversion — DPP 01 Discussion Notes", id:"1syaB2-f7qHBtCmDfXtYLPgDG0NxijB9l"},
+  ], dppVideos:["1eh3yKTR1z38Z-fhT519wgV4nWmxFMrcJ"]},
+];}
+
+// ════════════════════════════════════
+// COMPILER DESIGN DATA
+// ════════════════════════════════════
+function getCDChapters() { return [
+  { code:"CH-01", name:"Introduction", lectures:[
+    {num:1,title:"Introduction Part 01", videoId:"18Kb0FZIvWwgQyI6o7VjxaFhBNvrs6fPa", notesId:"1vTjqvfguKfIT-U7WGpOkJufHvwpz5zVw"},
+    {num:2,title:"Introduction Part 02", videoId:"1sRTc66c2oXrXItH7JPb2hye4LxggXiUz", notesId:"1SG_PvTSn4uqiaH_hSR188uHCXtJROkdh"},
+  ], dppPdfs:[], dppVideos:[]},
+
+  { code:"CH-02", name:"Parsers", lectures:[
+    {num:1, title:"Parsers Part 01", videoId:"14hL_cgzc-vJRlYMRZGAzqaq5h9E9Qa7n", notesId:"1RHxqCu2ejkmCDTgcG3S9retkHYUJ_RI1"},
+    {num:2, title:"Parsers Part 02", videoId:"1TtybSwTA7hNpXjkwENqqThGhqoeiSfPz", notesId:"1BKQq4WU00d2eyatD9MCUEMS_izRRVuU5"},
+    {num:3, title:"Parsers Part 03", videoId:"1TNs7GQ0mVi7vfJWKHc7B9IhhBqVeS3Oj", notesId:"1Rdr1phKmrp_6s5If2mMEZ6kknlZalx9Y"},
+    {num:4, title:"Parsers Part 04", videoId:"1XlBxtWO5i37OtNJAZ5QQnkFQ5rXlEXb5", notesId:"1G3j1wjfJV3q-zLDf5EORsOxrYsHt86rL"},
+    {num:5, title:"Parsers Part 05", videoId:"1BnzAkyocbKmIkl_yfenAZ-n5DkSTLnxD", notesId:"1ZWB9rBDZO9BguGfT0BGBHvOUB_xOkRcR"},
+    {num:6, title:"Parsers Part 06", videoId:"1vg6WPEnp1TzmfHg4SGBhZuhJHYGKMR0I", notesId:"1ZdJ0YCCCatrrVsWyX7Jmt6kEJiSqs7pA"},
+    {num:7, title:"Parsers Part 07", videoId:"1NlPHgxm9ukK31BDGGBwqhSs9ad5khaAg", notesId:"1zVgiYgrTxG3tRhyoiIe0TztwixpNnuwn"},
+    {num:8, title:"Parsers Part 08", videoId:"10n5IDMZJRAidXIOP6nnlfEcWo-51u7xR", notesId:"1NLvYPbw84Zc_w7xedSWGL8Gyawr5L4pp"},
+    {num:9, title:"Parsers Part 09", videoId:"1WzKEvkpcCr2kTbkJa8VYlSPxW1jLR1jI", notesId:"123eyrneXmsNnrWaofj2hiw7Kf1Iym9kj"},
+    {num:10,title:"Parsers Part 10", videoId:"1tdmJd-HR1usM0CUZ_jWm3dG2yaKORS-W", notesId:"13yCMiNPtnGUpYaGOam188jpwBXqSTMpp"},
+    {num:11,title:"Parsers Part 11", videoId:"18EKkHFMKcud0FlLhsRdbX7oIHJ8Tq21l", notesId:"1AdcBU4jckT7DQN19bf65lrWo2w0gDeYa"},
+    {num:12,title:"Parsers Part 12", videoId:"1pIqGP17Dx2eebKBsK2tKclGKaxCoxGoI", notesId:"13KDmjgmKALBqclqdBKr-8ls86TCAq6EM"},
+    {num:13,title:"Parsers Part 13 (Recorded)", videoId:"1_U1Ncr9Hj48tWWA0Ah6knlSSuVxAMYkB", notesId:"13Nvi045sQIgokRFAvjvGUNvm794K0Nxf"},
+    {num:14,title:"Parsers Part 14", videoId:"1W9XPZ8SFqEdZKePcYUpkwROhhk63EBZ4", notesId:"1B7zLZyEFWIuQGBeNLwYGaYKeN1qLIab-"},
+    {num:15,title:"Parsers Part 15", videoId:"1M3cwv8u1mpaZqji3ogb5A8xZPhKeaZYD", notesId:"1a4zBLSsLYj34IIcWYNY3tdLepHSJr6GN"},
+  ], dppPdfs:[
+    {title:"Parsers — DPP 01",                  id:"1biUqqCOgPwp7NNY1Cxa1t79L2sIFPF50"},
+    {title:"Parsers — DPP 01 Discussion Notes", id:"102UiXyYrLnBqWBJaFoGQRrkOMkqEEUG6"},
+    {title:"Parsers — DPP 02",                  id:"1HuoqAeUbLBMaqPU4dH-_3FzDQo2rnXrc"},
+    {title:"Parsers — DPP 02 Discussion Notes", id:"11kcV-ZYfCUGHn-HNmzI0uN3wBW_08VR2"},
+  ], dppVideos:["1YS1bZa7--_KZd-AVI4z7C7DGLJXy6WBX","1OsWeJ85FOkrPXyxPvJWDBy53x7aK_8I-"]},
+
+  { code:"CH-03", name:"Syntax Directed Translation", lectures:[
+    {num:1,title:"Part 01 (Recorded)", videoId:"1kn-GcVHtmWLAh7joPC1KsMBtO2urDd0-", notesId:"1drtu65rvpF879bkYtE0LX-AeO_uve_UW"},
+    {num:2,title:"Part 02 (Recorded)", videoId:"1tAhZnojqDS0QE6iUJbCxpENziMmFJWt5", notesId:"10Hu5b-gEFRqfPli8MrD5y7lAoXxo_iUZ"},
+    {num:3,title:"Part 03 (Recorded)", videoId:"1gH_H-9qoyX892k9ftNzq753VwqEibfva", notesId:"15Yq85Kb8TJnzg9ePysLNLruaQnl_yf0Y"},
+    {num:4,title:"Part 04 (Recorded)", videoId:"14k-6WINatKKFEbEH44gdg7KfuqgKGLhl", notesId:"1_eNBCks9VrYW9Ky4mFjfWuACK854PKpB"},
+  ], dppPdfs:[
+    {title:"Syntax Directed Translation — DPP 01",                  id:"1-kGiTCT6bDECsdAIo3LJRs1Uv_3C21lT"},
+    {title:"Syntax Directed Translation — DPP 01 Discussion Notes", id:"1er0aepDC2zHCkXsMgJTOTd7_311d8RnA"},
+  ], dppVideos:["1OizaQTfsPT02Bd-Uy2Bh4xE3OESddWXV"]},
+
+  { code:"CH-04", name:"Intermediate Code Generation", lectures:[
+    {num:1,title:"Part 01 (Recorded)", videoId:"1NcJfcHaGC1eBXndU1OWG9QhJ2VzaJSNC", notesId:"1L_SnSLFdZu8qPvrmz4sH62CFgHmPLV0J"},
+    {num:2,title:"Part 02 (Recorded)", videoId:"1d1pxZlJcMeBh3CcD1jYkS0d1gGXxIuMk", notesId:"1N7GDBSJ84E4GW6Isso087eeoJTrVuNB0"},
+  ], dppPdfs:[], dppVideos:[]},
+
+  { code:"CH-05", name:"Runtime Environments", lectures:[
+    {num:1,title:"Runtime Environments One Shot (Recorded)", videoId:"11o-t9GKwl2yqNS5aN5z_4XdyChr_u8OT", notesId:"156F3cKJbmYW9cTyrLlRA3KbnHrdJmBab"},
+  ], dppPdfs:[], dppVideos:[]},
+
+  { code:"CH-06", name:"Code Optimisation", lectures:[
+    {num:1,title:"Code Optimisation Part 01 (Recorded)", videoId:"1VFI4z7IFdPX0-edMNQNSHtZtklxb91IJ", notesId:"13IXJvzHmiuvJX5Le9ZvaIloH2OUq34PL"},
+    {num:2,title:"Code Optimisation Part 02 (Recorded)", videoId:"1VgK0R6qHiWtBx_gmcReJdDogzvp8BMbw", notesId:"1foTmgXVDSnMjD9NVgXdKHWsiXADb2-R_"},
+    {num:3,title:"Code Optimisation Part 03 (Recorded)", videoId:"1aFiDNMB4rZgqMss6KBrN4Uu5l1SFMIVg", notesId:"1s05VkW2SSqLFMMjYF1EWhDP3PM5dmRjT"},
+  ], dppPdfs:[
+    {title:"Code Optimisation — DPP 01",                  id:"1UDt6tu3nkvhTXd7nNFfA9cFrq2m0uJxS"},
+    {title:"Code Optimisation — DPP 01 Discussion Notes", id:"1ub6tKGLDO2krOaVCAFAl6QLXjN9u87pe"},
+  ], dppVideos:["1ob7IgRqkWhawV7AzgSJjodWzjYzaL_mU"]},
+
+  { code:"EXTRA", name:"Live Variable Analysis (Extra)", lectures:[
+    {num:1,title:"Live Variable Analysis One Shot (Recorded)", videoId:"1DoldZfMHM8x6xZGSZkRn9Vsa2LvqdJ2b", notesId:"1Flm9NTBxLnUd9i6Bbr1MLB0ayen0aoBE"},
+  ], dppPdfs:[], dppVideos:[]},
+];}
+
+
+function getOSChapters() { return [
+  { code:"CH-01", name:"Basics of OS", lectures:[
+    {num:1,title:"Basics of OS One Shot", videoId:"1OQ8bbOqPCJ_tfjW5GtBl3Sbj32DqSzZD", notesId:"14jlrR5lq8IaFD_6cHyPzOnPH1qa0JT2V"},
+  ], dppPdfs:[], dppVideos:[]},
+
+  { code:"CH-02", name:"Process Management", lectures:[
+    {num:1,title:"Process and Process Control Block", videoId:"1v2ghmN_C4HihgXw8RXNiDt8L0b71tAh0", notesId:"1s02_CDG9FOb3bspemK5qs4AGYOjzLQ6Y"},
+    {num:2,title:"Process State Transition",           videoId:"1DQ6BCfjd8-OfbNhv_oH2oReThqi_BhGk", notesId:"1368ASYjWzRHCWRiT59f5lSitGfDdvCeo"},
+  ], dppPdfs:[
+    {title:"Process Management — DPP 01 Discussion Notes", id:"1tmaJ4cRAbxo0-br1jZ5zw5unL7y2cFzf"},
+  ], dppVideos:["1H48kbArVe-U599oht5qYgXkbg_eD4YHV"]},
+
+  { code:"CH-03", name:"CPU Scheduling", lectures:[
+    {num:1,title:"FCFS SJF Algorithm",                         videoId:"1OHv3FqXEaHCX28AAP1bFGd1kDnL2cShk", notesId:"1Zh-cLaWpfTGSBJo13c4wKMpx9Gg98l7j"},
+    {num:2,title:"SRTF HRRN LJF LRTF Algorithm",              videoId:"1zyxV_8rG3Aw8KZzmQROjqZwrQBNHknQq", notesId:"1VwNUJpJGX9EKnCPwyyXY0f2RvQBm01pO"},
+    {num:3,title:"LJF LRTF Algorithms",                        videoId:"10gQOM6rENUdDx6R2sty2nRU3JR6XvUOq", notesId:"1Ta5ZNjDYUpxLY4uoODX2V3p3APj1GIJK"},
+    {num:4,title:"HRRN Priority Based Algorithm",              videoId:"1QlEsRrToTaX08-gtXG9jClnxnGUpHdtt", notesId:"1nhX0y0WPxuNcFecnx8a2YNtpSdkoi8nJ"},
+    {num:5,title:"Round Robin Multilevel Queue Scheduling",    videoId:"1WYC46vbZWtnmqMXTpvlOPzfiLTomvZ_q", notesId:"1VM9mqFgw9EqtaT0SBm79uSVLM1u-sih7"},
+    {num:6,title:"CPU Scheduling Questions",                   videoId:"1I95g_sProUlQ1WQUXP6wYGwFf2rdx_Sr", notesId:"1gT4s9x7V1Rvv_q94l2m1k86g62PSEbm-"},
+  ], dppPdfs:[
+    {title:"CPU Scheduling — DPP 01 Discussion Notes", id:"1ijXA4xDt4OkqTII_2HeTQ6sSkAuCvvPm"},
+  ], dppVideos:["1XPRGLkZzu8QU1Mbp9XccjGwOjeyOlF5K"]},
+
+  { code:"CH-04", name:"Multithreading", lectures:[
+    {num:1,title:"Multithreading One Shot", videoId:"1EFrImQW7dSpMszYl6cNMEDXs9rjBrPMT", notesId:"1n1mnUnRuGznpvSCQPEUNfxEuZJcf3qsP"},
+  ], dppPdfs:[], dppVideos:[]},
+
+  { code:"CH-05", name:"Process Synchronization", lectures:[
+    {num:1,title:"Race Condition",                      videoId:"1WjibdDSI1yuwWWaSz_3VUP9bmjDAWCHg", notesId:"1tCe3astsaIAuPbX-G454_-2PP0GAb43G"},
+    {num:2,title:"Critical Section and Its Solution",  videoId:"1VQ62VM1TWD_8dyDX_Pcu_tbxY8qdNmK9", notesId:"1x5rA_S1EBaUW3qr6ibGkCzv1Njkv6ZH8"},
+    {num:3,title:"2 Process Solution",                 videoId:"1oHxOXz5xtETCkvPK35wlEhFsDMVUNje9", notesId:"1hKGtqMnNhx5UuEZs4UwfRPT8lEPM1iE3"},
+    {num:4,title:"Hardware Solution",                  videoId:"14bdT_uDGoNy03Vr4VCbYmVrusmQlXFFH", notesId:"1GllPy7oKR6LufTtdML0uzdvAUbvIpJBZ"},
+    {num:5,title:"Semaphore (Recorded)",               videoId:"13GI2q6obXhkCZfGoLb1WYbDEGyD7MJW-", notesId:"1DUc_cltrmZ82jAgOo90uXB3XxuQw2hi7"},
+    {num:6,title:"Questions on Semaphore",             videoId:"16EPuEkDNMrCJix2qS7wO1hGq9l3b1bUd", notesId:"1QEXOrV7NZijo1p7KQNV4nW7JkWG0kYSy"},
+    {num:7,title:"Classical Synchronization Problems", videoId:"1qzeFE5Pt0saUFFoDHvNG-Rg05RrZjYn5", notesId:"1QEXOrV7NZijo1p7KQNV4nW7JkWG0kYSy"},
+  ], dppPdfs:[
+    {title:"Process Synchronization — DPP 01 Discussion Notes", id:"1Fe8-d1wg5aXK5BlFugF0_ywohrKfcqXL"},
+  ], dppVideos:["1fVY7PM6Mu5yz73KGRfdtxKtmBmEx8E-Y"]},
+
+  { code:"CH-06", name:"Deadlock", lectures:[
+    {num:1,title:"Deadlock and Deadlock Prevention",           videoId:"19l2RAeXJddZvcuQlkYywVTmelTcTwPZn", notesId:"1Xs7ZswHPpNIlCTw315pOiwY8X34dQoOc"},
+    {num:2,title:"Deadlock Avoidance and Bankers Algorithm",   videoId:"1JuMhwKAzqEJiDCZcNWVSz0r5vsXPKNzy", notesId:"1v5ns7HZBbTXHOMOonrDrTK-dJXwb8XLF"},
+    {num:3,title:"Deadlock Questions",                         videoId:"16_vTj3_XpqSDb1OL2E1Q9Z_e9BhkHrO_", notesId:"1RckuoQkdcOqC_sh6ATDchW7qQqv2pJTd"},
+  ], dppPdfs:[
+    {title:"Deadlock — DPP 01 Discussion Notes", id:"13uLIfcAU5O4-APSEai-Tyqr_o36QjhUX"},
+  ], dppVideos:["1wgnSmSSOqPwmQmCP6LvMqza14qzo6hKp"]},
+
+  { code:"CH-07", name:"Memory Management", lectures:[
+    {num:1,title:"Memory Management Techniques",         videoId:"1JDcEIbUHngUjUG6dVCTMhfrlibNeCuwA", notesId:"1cHr3zU-Wk4EPxucI0Q4LlkQ662XDMoL3"},
+    {num:2,title:"Paging and Address Translation",       videoId:"1JLDvuRnlGPrmcwoEN47oNTJvhrD04c8Z", notesId:"1FPKeVV2zHkzVstP_u-Fbcu-309H2W9Vx"},
+    {num:3,title:"Translation Lookaside Buffer TLB",     videoId:"1LwvjKSu9Zw5giPvz_SPwqqEAUgttQ5T8", notesId:"16JzmZQcxsgu9G2EMNmyDKh7FFHoE7rRz"},
+    {num:4,title:"Segmentation",                         videoId:"1eT6yAJdsK5h9vjebE64tWYl8BOFArh0r", notesId:"1QGKK0px2COr3l_S0XJjWYjaDjBITReEY"},
+    {num:5,title:"Virtual Memory",                       videoId:"1kThHmKo1hpK-dcn6oGMZR7pENf7Z7xFc", notesId:"1-uvYFyTkPeMPO53nn0CtGgP7cyWONihb"},
+    {num:6,title:"Effective Memory Access Time",         videoId:"199G_N3RkyWkZ7meMVv1A74y1c5RvZ4Tv", notesId:"17w1gDvXYI6YbizkUuuc4ZizuDCdSsndQ"},
+    {num:7,title:"Page Replacement Algorithms",          videoId:"1Ma9KQwPZY2zp1LtZ00dIiXBr1uf3peqA", notesId:"1cPsxpQOw847fDKgkbzrv5Ihm-kNk2jRG"},
+  ], dppPdfs:[
+    {title:"Memory Management — DPP 01 Discussion Notes", id:"1sT51RUoTPOIYtcU6nfbAQdzYWeTac_KH"},
+    {title:"Memory Management — DPP 02 Discussion Notes", id:"17iKSwLOcTw0vrrhYP7hTe9TpHlMJBpUe"},
+  ], dppVideos:["1rtaRTexhrviYvQ6xk2Zgk41658xo--Hy","1qejHBaH0Nuc5sScZHrhuDobppt0LLC2O"]},
+
+  { code:"CH-08", name:"File System", lectures:[
+    {num:1,title:"File System",            videoId:"1H3AiIm0Rtxxxi9dxDjRFS8YAZCb7AXac", notesId:"1xblCn17_Z9AOOIQ07bMNPP5E5PbtmxuQ"},
+    {num:2,title:"File Allocation Methods",videoId:"11TZwGIsBpX_AVA3WJcRMnsYk4Ub7W2Rq", notesId:"1yDQ_I_4EnU8S4fdz76iGAXi1YIL-6WqV"},
+  ], dppPdfs:[], dppVideos:[]},
+
+  { code:"CH-09", name:"Disk Scheduling Algorithm", lectures:[
+    {num:1,title:"Disk Scheduling One Shot", videoId:"1CQgx-b0x-8hdLhNR6vJT9imi2Lcelhia", notesId:"1i9_LoocZDus3yGXRVJz8FrpL5RZ1fmXo"},
+  ], dppPdfs:[
+    {title:"Disk Scheduling — DPP 01 Discussion Notes", id:"1dIKfWKGrbRvWLbwrMDrJQQcJ3I4w0eCj"},
+  ], dppVideos:["1rYj8mCv40wtiy9yspdAxEftwV8_CVdDV"]},
+];}
+
+// ════════════════════════════════════
+// COMPUTER NETWORKS DATA
+// ════════════════════════════════════
+function getCNChapters() { return [
+  { code:"CH-01", name:"IP Address, Subnetting & Supernetting", lectures:[
+    {num:1, title:"Part 01", videoId:"1kpyJgu8gNJM6KLhyJsuNUtQ1T-jsPA8w", notesId:"1pakqiM5Q0jvnFfog8-Lxikc9XC96xS_N"},
+    {num:2, title:"Part 02", videoId:"1qJe_g4G9BW_hoMxDYyvFXPsIPjyF2bzs", notesId:"1Lod7ZhCkWMHso53VzWnJWuBTFKZls93x"},
+    {num:3, title:"Part 03", videoId:"1JP5U1q_FkYXic5-FfeqXpPPCX4Gy04HV", notesId:"1VNiAcJkW1MgT4XQimRkKxFd2RoDdJKaU"},
+    {num:4, title:"Part 04", videoId:"1qft-UL9q2l8V4kQAvQOTzAp631JpnqZE", notesId:"1AkzBHyT-kneCzwUz9n3amxk7eMN1jAfc"},
+    {num:5, title:"Part 05", videoId:"1_djspLVQe60nfGllRdbo8MwqzyVVXXLE", notesId:"1JDgyYE6JtyO18FKq4uZk82cRRtT2JfQ-"},
+    {num:6, title:"Part 06", videoId:"1Gxs7lspEpjFxIb9NLjKNCH905MupJFWU", notesId:"1S1HZOsFdavgg7lmheQzJUPNqC9cQ5TVx"},
+    {num:7, title:"Part 07", videoId:"1elRVlyd8pru8Hpu7FDvPEZStXbLYpqJt", notesId:"19U9bgOAubXqHErX2mr5Z9oUGJFK6Qe3o"},
+    {num:8, title:"Part 08", videoId:"1phQAH1q5SVzbmTfQWpkr8a7tutV-GTsO", notesId:"1xsBEFr6OMkyaB2BErichAVPumQ8CaVAU"},
+    {num:9, title:"Part 09", videoId:"1bZmG-uqKxdImGzar6ZqzbvKFbUVulB2m", notesId:"1zLijEYWef4OVbIY36gF1oFBRhO9uYK7t"},
+    {num:10,title:"Part 10", videoId:"1jXDRraX7lSPRK5tkmQal6VNGSxp50ha_", notesId:"13UuSLKpY5hepviGX7yghU1271ey6PUBs"},
+    {num:11,title:"Part 11", videoId:"1TNJ3CW1ELGblUihyPJG97vphvEG7fA9x", notesId:"1IsKZsZcHMcSMIXneHrsn-pjnVfEbSZze"},
+    {num:12,title:"Part 12", videoId:"1LovN-zG5zVgqna2sEcxwIx44kPwN9t1W", notesId:"1B6NU_C-jdQYbjzVVAxgwg51txXOtR87H"},
+  ], dppPdfs:[
+    {title:"IP Subnetting — DPP 01",                  id:"16OBgWt0JY3Y9AEQZ6g-NakPD0TK2CVpP"},
+    {title:"IP Subnetting — DPP 01 Discussion Notes", id:"1_fp-HvFtXll0dLECni1UJc0Vw5NlFFS3"},
+  ], dppVideos:["1JxpyA-Sz3jL9AdRDjZYMbARtmIWf1uiP"]},
+
+  { code:"CH-02", name:"Flow Control Methods", lectures:[
+    {num:1,title:"Part 01", videoId:"12FQXdvFduKTuVH6ELvkwEaMlfCrKK7bZ", notesId:"1AA7ZXWq8dFiaD0hnfCPKHMfLW30uTaSf"},
+    {num:2,title:"Part 02", videoId:"1df8rBzJxbrfKsaw3jiURb9Mwvo-7PxkY", notesId:"1DdogN49Bcamll0g-hi8gXvJKWI-4zea0"},
+    {num:3,title:"Part 03", videoId:"1QiAW18u-wl7zdVPsUuMBEP3d_av3JsIJ", notesId:"1TWVjV1jqzpgmSVSxE4nDeEFYKaEz9yKn"},
+    {num:4,title:"Part 04", videoId:"1MljS3lIvfwi4HaNkJQgqA8cXgApBVSWo", notesId:"1LZgvTczllOqQD9-lGuBbUtjGhmXMvhGA"},
+    {num:5,title:"Part 05", videoId:"1TJ15HuRLP-hrXTSPQLyQVTwYxcDGsCw4", notesId:"1aFjrz2mwNcViHiZOjJ7Nj-TYMgrymI6m"},
+  ], dppPdfs:[], dppVideos:[]},
+
+  { code:"CH-03", name:"Error Control Methods", lectures:[
+    {num:1,title:"Error Control Methods One Shot", videoId:"1_HMxbSr9NlRxHPNKrXnmhTfQk0Ek4pYG", notesId:"11Nge30_EXJdeYjlnvW9Yw7KpmZsfomvV"},
+  ], dppPdfs:[
+    {title:"Error Control Methods — DPP 01",                  id:"1YYaMoGIsIMRIws9asvsLnT_w-PP34ZRO"},
+    {title:"Error Control Methods — DPP 01 Discussion Notes", id:"1YpMCNeS_7avtonCEmaOwF6AqygUhQ0l-"},
+  ], dppVideos:["1yZ8ntBESOLoPXaqbllUlt7njbJPCRipk"]},
+
+  { code:"CH-04", name:"ISO-OSI Stack", lectures:[
+    {num:1,title:"Part 01", videoId:"1EiKcENp-HZMrMRCQfD-zQY_xC-FpDqmg", notesId:"1oV2BIBVbwBWdBeyCNg7xnVyls4nbWvl3"},
+    {num:2,title:"Part 02", videoId:"13JMBd76jwKg5akvd8mGypnTq2f6VW9ut", notesId:"1rehT8t78xbzJ2yoElScKrnCEDSMrSmQx"},
+    {num:3,title:"Part 03", videoId:"1eBmTfB-VpxiX2oDYngWLRK_rQB1dr1Xq", notesId:"11NPWe-tBor4Y94VgQMjL5D4k6tOxnIYP"},
+    {num:4,title:"Part 04", videoId:"1qUybLBYtyBRsqnVEn5uK0vtFFJP81T76", notesId:"1JLJYpDCa1_Rd8vQVLuFWABzXHa2vLtHs"},
+    {num:5,title:"Part 05", videoId:"1h7f_5tsbs8NZ-wwaVrlqpHPR9VUZ2h4Q", notesId:"1SG1tNKexL4ZhYq8GSFOZC-mk2gE55X-Q"},
+    {num:6,title:"Part 06", videoId:"1sZ2_qzx5p-DdI6YELvudu5RFWX4XQzyJ", notesId:"1LmhqvOemrENrvAwHrUHhf2ljFqmG3Q7l"},
+    {num:7,title:"Part 07 (Extra Recorded)", videoId:"1oHiaapXhFQ4MJknirOTWCG_AclsXinBN", notesId:"16pJOz9P8T_4aA49rrp6dSb5ZnKEo4qN4"},
+    {num:8,title:"Part 08", videoId:"17aCxE4iYsUV250fj3dLsjDzdVh1jZNWG", notesId:"11kiCYkSH9ldM2FMJuvJIEdgZXwrIJmnP"},
+    {num:9,title:"Part 09", videoId:"1oO8LJw9WdUx6SI8UD1L3BD4ymnpxyZvm", notesId:"10oyicr2BHMqpAkdZLIP7e79KhoPB1FPB"},
+  ], dppPdfs:[
+    {title:"ISO-OSI Stack — DPP 01",                  id:"1vDY2NK0H8AA743DAxPWjaDfgWdRYNyvG"},
+    {title:"ISO-OSI Stack — DPP 01 Discussion Notes", id:"1SyxzZwN96r8izqkW6YSEKfbhDEKnYSjz"},
+    {title:"ISO-OSI Stack — DPP 02",                  id:"1VL5rrTwoV3I8ni5wuJ1KTE7fNn7OJCZ1"},
+    {title:"ISO-OSI Stack — DPP 02 Discussion Notes", id:"1zqETY8ngOwcfXrIHPjuW1r68KUAy4YPe"},
+  ], dppVideos:["1KnllAd3xjmyEg5vn4_V4VEZoYibOOwej","1Ttq42O3szjO8Gb9cP0XWSFpzdGoc1pYc"]},
+
+  { code:"CH-05", name:"Routing", lectures:[
+    {num:1,title:"Routing Part 01", videoId:"1hXyYqQyBvr9SA3O0kqxHNEdqZR5Q7_rT", notesId:"1wqs3AY1nBD1yAgGcGs_HYGiqRMyzXSTI"},
+    {num:2,title:"Routing Part 02", videoId:"1qV6i8419RNi8IXEaLDbm66SVj8Jt4saU", notesId:"1C8h7UiidcKOliZURMlP8Sbv55MhdHh_B"},
+  ], dppPdfs:[
+    {title:"Routing — DPP 01",                  id:"1BOqxSI-1hZCOzOv3puf5R8Id3p2F5Wtm"},
+    {title:"Routing — DPP 01 Discussion Notes", id:"1URC4k-wQObsqjZBqHn0ZV7KU8mIujt-G"},
+  ], dppVideos:["17rz738AlSth82WpcmobosVZWTLGVpcrI"]},
+
+  { code:"CH-06", name:"TCP and UDP", lectures:[
+    {num:1,title:"TCP and UDP Part 01", videoId:"1-nRQykcLVsQMIKdT7BHJBNRNa9Cfl9cE", notesId:"1GBW6NmJbzJyN72Zv5d6aYjHwLxzD-gUR"},
+    {num:2,title:"TCP and UDP Part 02", videoId:"1U4es2aVmahwNB1HhVopC78v5RGWgUdbQ", notesId:"1Q3DbqWCtqK1tiSKJK7X63QtzcZCBDmWU"},
+    {num:3,title:"TCP and UDP Part 03", videoId:"1rpPxi9qrU76YVwHRpMh9bnhl3tj6PlIa", notesId:"10hvxLlXxW0YKcL1lVvYujhN2r_B1iVqy"},
+    {num:4,title:"TCP and UDP Part 04", videoId:"1MTa5dkSviBbvscNjOhth1JrItQyIsryz", notesId:"1dcuxuzNGLvmdSifrhjKYQxu2rrSn4Bgd"},
+  ], dppPdfs:[
+    {title:"TCP and UDP — DPP 01",                  id:"1X3aEGMxjCX_YxHYL3neiSOarPlelwSRB"},
+    {title:"TCP and UDP — DPP 01 Discussion Notes", id:"1Bwzs7ragyRKFV34eQlLCfzYDWCDJ_ZCJ"},
+  ], dppVideos:["1Q35tk2s3_5dMm8q7lS50eD89xZL1KaL7"]},
+
+  { code:"CH-07", name:"Hardware & Networking Devices", lectures:[
+    {num:1,title:"Part 01", videoId:"1eAMGI0eQPi2ZiMGGpg0thD7r6XpO-6Q8", notesId:"14vFBC9RUsfKs9oHpfLKmWptI91sMsIiv"},
+    {num:2,title:"Part 02", videoId:"1t11u72tEMZZku8_Zpp83gu9cCv4iTwsU", notesId:"1W2ryVIJBQU4V1i5owDNes2QqhIcUHp1k"},
+    {num:3,title:"Part 03", videoId:"1nSCeaxF5MQYgMJg_dt0C3OTNHewU-cm5", notesId:"1gW5_GN7FDjgBZvqiHzve30gdIT-Bl-Co"},
+  ], dppPdfs:[], dppVideos:[]},
+
+  { code:"CH-08", name:"Application Layer Protocols", lectures:[
+    {num:1,title:"Part 01", videoId:"1C0to0OH_Ngbwu-V_-YpHKguPAqwju6Pi", notesId:"1XzdMha_wc1gq-EWgdcMM5_43KKjm8R0i"},
+    {num:2,title:"Part 02", videoId:"17dfvCPp_Q9SmetPk3SzwvCufSuhHvf1c", notesId:"1vho9DseSmYOhd_M7OxrktxzjbiYRzifd"},
+    {num:3,title:"Part 03", videoId:"1dtyK2rrpXGtsnEUwLH13XcklVtV3rQ2K", notesId:"1Xqs4qfHIKrLts3t87bsuGyIe_Fs0ht7L"},
+    {num:4,title:"Part 04", videoId:"1hxMcksF7YhSDIAUFCgiTRwf6WheYw_R3", notesId:"1ij8OIfOaMZ6iDr8LaeS9O8v_WSEFkP1J"},
+  ], dppPdfs:[
+    {title:"Application Layer — DPP 01",                  id:"1dX0CFeRV5J5Z06ky_l8jOrhteTqqaAKz"},
+    {title:"Application Layer — DPP 01 Discussion Notes", id:"1dc9F7Wsl8lNEr27f-RwEaoZ4xR1a0jk5"},
+  ], dppVideos:["1dFENsWSt2N8Fd6KUJ8uFTmLPbCgrZ4at"]},
+
+  { code:"PYQ", name:"PYQ - Computer Networks", lectures:[
+    {num:1,title:"PYQ Part 01", videoId:"1ipUh3WzRkspyusZzC1wik1x-ab5YROYm", notesId:"1n0VjcoQrD4ztWKVqK0cF4mSg03EaD9Ag"},
+    {num:2,title:"PYQ Part 02", videoId:"1HVP1KjFujoAVnrQaDUtnnZh4OFpinXLV", notesId:"1NfAwsYHSPMi6ry_j0YoppCAMHu8rPGQh"},
+    {num:3,title:"PYQ Part 03", videoId:"1ozXzgHDhjN1KBiRGqku3lpSU7E1FYbFZ", notesId:"1txWP3VB9T8Ba6_upIhzrhD5aRP5Mq5P8"},
+  ], dppPdfs:[], dppVideos:[]},
+];}
+
+// ════════════════════════════════════
+// DATA STRUCTURES DATA
+// ════════════════════════════════════
+function getDSChapters() { return [
+  { code:"CH-01", name:"Array", lectures:[
+    {num:1,title:"Array Part 01", videoId:"1XMLp3UnQMKpx8zqLGFEq_McUMTChq8hm", notesId:"1Kl3dk_435lwqdIoW3cXAO2P2O0-RPSxY"},
+    {num:2,title:"Array Part 02", videoId:"190Pd2gkFHrNP----5IgexMVqbvbFVdtW", notesId:"1geeAuo76dsnr4-GBT6uuosM9aC_Ndpb5"},
+    {num:3,title:"Array Part 03", videoId:"1cf88IPX68bD1tBXTRjDy0dpZGvlFp9yW", notesId:"19P5PgNj77neGN74Kv08369_CCnXXbCEG"},
+    {num:4,title:"Array Part 04", videoId:"1qIW35eQ6c6-MMmNonm1da7Osc_gwKzU5", notesId:"1EYwVmGnLaem7XiLUxxZo7DuSj_rDsLiy"},
+  ], dppPdfs:[
+    {title:"Array — DPP 01",                  id:"1E8aVD2Cfzf5J-63nQtQNrqprKl-rrlsd"},
+    {title:"Array — DPP 01 Discussion Notes", id:"1a8zIKdJUZzOqQk7f_4N7dB6Lr0wv5NCr"},
+  ], dppVideos:["1xmMlomm7PWwnFoxZmDTe5bnp18ClfS89"]},
+
+  { code:"CH-02", name:"Stack", lectures:[
+    {num:1,title:"Stack Part 01", videoId:"1XcrxzwHdyq1NmEiRS-8Jdpph6thhKYpw", notesId:"1oZDvToibJ4B8HHGq4x6RwyYJAMD9FOC1"},
+    {num:2,title:"Stack Part 02", videoId:"10q-E-1z8QRT67JZofEWjtBbLeegs2FwY", notesId:"1FbMS8NR5vxpdh5skQQNW-MD0TUqTU6Wl"},
+    {num:3,title:"Stack Part 03", videoId:"1Z5HShasNA0AFiTCvKMSRcakQ5vR-EJIe", notesId:"1o4uPlLsjbdWrHhil8t02VmejJIOVauYa"},
+    {num:4,title:"Stack Part 04", videoId:"1pESmDCf6cVo1gDhp53SB--1XeMKKG_tQ", notesId:"1uJeQytiD8ZSnb1IIrCDn5_hITl2R3luZ"},
+  ], dppPdfs:[], dppVideos:[]},
+
+  { code:"CH-03", name:"Queue", lectures:[
+    {num:1,title:"Queue Part 01", videoId:"1NoqGJSzC-GKyGbknkqWPSWeDdY5JOHog", notesId:"1gunLsynCZU1X9ikZhTggLqUJEShDMCvK"},
+    {num:2,title:"Queue Part 02", videoId:"1D26skpNFYdc37iU9V-ekyWVX_tmV1FdU", notesId:"1FzamCCmpooCHrqM3L875ce0_Q0pwt_fJ"},
+  ], dppPdfs:[
+    {title:"Stack and Queue — DPP 01",                  id:"1LjqF4gPO_iJ4b6ul1N0YvZB6j188OtNE"},
+    {title:"Stack and Queue — DPP 01 Discussion Notes", id:"1VSKE4xK2Jz1ty7tMly-_MspA5smmLnGO"},
+  ], dppVideos:["1pzASbuQirok8UrhzW7fYqMkFPXMdHmH-"]},
+
+  { code:"CH-04", name:"Linked List", lectures:[
+    {num:1,title:"Linked List Part 01", videoId:"1tGRwykvf9n0tmKLuUvDEmfwoknvIpakU", notesId:"1UvP7rlHXXLKmBIgaBoD2omd6CwoRK2zh"},
+    {num:2,title:"Linked List Part 02", videoId:"1UzSugmgRboYtnvZ0VmUNTbPZ5XBWpv6W", notesId:"1k9togadwoSXrgDj7vlOEBbLVRkjpdmQf"},
+    {num:3,title:"Linked List Part 03", videoId:"15zT9Oq170Rd1kC4GujYJiDfrlGwY6w9R", notesId:"10SBEAcpM544mhUYooedoZznHEKs3_v-W"},
+    {num:4,title:"Linked List Part 04", videoId:"1ayXyMkl3-35EUK3cLVhbX-OP_tS1It75", notesId:"1uWe0t1YGqtz5s6s5-zNYaan7pYP-7sLp"},
+    {num:5,title:"Linked List Part 05", videoId:"1agJ3mpps6yr7LK5Sv5cFCJaLU7dmpnpQ", notesId:"1XJhuBuraPyK6cu2IITGZGlHVIWD2Cyua"},
+  ], dppPdfs:[
+    {title:"Linked List — DPP 01 Discussion Notes", id:"1gJs9hltNgkFJcwHGnWreysF6BhxFx3LF"},
+  ], dppVideos:["1rL0kP0LPh8lWreDAC7-11anPsDat7ACK"]},
+
+  { code:"CH-05", name:"Tree", lectures:[
+    {num:1,title:"Tree Part 01 (Recorded)", videoId:"1uuFQ7Zol8kjmFeRYX-0cejT9CxUeXT1j", notesId:"1UPoz_NiJqG8ytgnsd7RLUEOsKmCwHxbC"},
+    {num:2,title:"Tree Part 02",            videoId:"1wpajG1uNZQBGt6_rP83AmYMtzRPtXjrl", notesId:"1_5HNSn4Z_zJ1dvlSdqkFnAgQ3rjcmoXe"},
+    {num:3,title:"Tree Part 03",            videoId:"1EPRXQ8FGqZkWB0Uctu9HukR-crMFdHsh", notesId:"1c7lAlF7DmtoUow6BrkNgH-6tZNKioxQ6"},
+    {num:4,title:"Tree Part 04",            videoId:"1pd0Lz6ZbwGtplQC6ZhqkiP6OK1AmeT6q", notesId:"10-2nowzkh49RLNCKam-Ol3BgylGlMWHp"},
+    {num:5,title:"Tree Part 05",            videoId:"1l8RjYaTvxX1ZrrHBCsRxtYo5BtczmktO", notesId:"1K6WA0dIUWEB7-YQNWLWJzegVUeD2X5Ry"},
+    {num:6,title:"Tree Part 06",            videoId:"1N0PQXw8RwRPxMG4LnDrJSxic4Wi0tyrn", notesId:"1WGsFaf8VapB-KFDkorKTi0XHJPPhsjxb"},
+    {num:7,title:"Tree Part 07",            videoId:"1u50vHeOV_i2N8-U2uDBGiH6dqpbsxM8U", notesId:"1TemckO-C7IYWxa_Fm0hYP2fShmTFx4l8"},
+    {num:8,title:"Tree Part 08",            videoId:"1cvBi4NHuzY5mhuuHPEVu40n0aXcSkx7D", notesId:"1kcEfa4HiImSl0Udk64RzaJ2c8n-PWkSL"},
+    {num:9,title:"Tree Part 09",            videoId:"1qLvdVPniK8hBd8OKuhCgz0gQmOuVSboh", notesId:"1YWgbZJr7ejmbC9slViPkRWweDGUV-es1"},
+  ], dppPdfs:[
+    {title:"Tree — DPP 01 Discussion Notes", id:"1A-LXEJI7sd-vvPsS7NT_knC66l5QwEe7"},
+    {title:"Tree — DPP 02 Discussion Notes", id:"1yuxxAMz51g32rEnffbxqapMggFLw8hpb"},
+  ], dppVideos:["1Gxo13hE_Xz1jWrLTz2EsqkBC4ll8KByY","1ht9Gd3msVtThXbei5dmRFroWHzsYdkif"]},
+
+  { code:"CH-06", name:"Graph and Hashing", lectures:[
+    {num:1,title:"Graph and Hashing Part 01",               videoId:"1mj-dwTsd-Rgn94FKYo4eCWunUkShdvhC", notesId:"1MytKQNuQMoNh-Z9v_lPO-Bkqu9J0zwz0"},
+    {num:2,title:"Graph and Hashing Part 02",               videoId:"14LO3RQ0SEOTTRV76RgveNSgIkE_WzCZ7", notesId:"1V56w2vIjctImoZ9Ao2nZzPOycogJr-N0"},
+    {num:3,title:"Graph and Hashing Part 03 (Rescheduled)", videoId:"10mIeY03PCQk7IK_0xgjbgBo12VTkZdtx", notesId:"1DzXxdzBsUBQ0kbt2BtaQ_GQQCtg92sFg"},
+  ], dppPdfs:[
+    {title:"Graph and Hashing — DPP 01 Discussion Notes", id:"1A0VyJp4tXe2pKLxKLHjznUaRHSgmYyaB"},
+  ], dppVideos:["11kpjr-7Wz9EsjGf3zVbbDd56dM5nogIf"]},
+];}
+
+// ════════════════════════════════════
+// ALGORITHMS DATA
+// ════════════════════════════════════
+function getAlgoChapters() { return [
+  { code:"CH-01", name:"Analysis of Algorithms", lectures:[
+    {num:1, title:"Part 01", videoId:"1-brJ0_trfIo1MjsERjtoaPfMbnjZUolM", notesId:"1oKuNUxvAB-xyPePhYiylnceYjYqlQ-L2"},
+    {num:2, title:"Part 02", videoId:"1n7OrZEc7fE36T86Km7-iKezuwzbbJBXP", notesId:"1Lxwj6Vj4JpWv0XVJKaLz_3u2K2qFr25W"},
+    {num:3, title:"Part 03", videoId:"1s1RADH6V4TEl7AMpd_S5FnkOxfpeRte_", notesId:"1LMAi_RBdBtujsUMeWGd8G0JPSeA9iMvM"},
+    {num:4, title:"Part 04", videoId:"1G4w0AvTXa5KqMUNH1NSirs27nn8QLJEN", notesId:"1eioPBDD0-vPCdxGtIY4JGR9pCeNts44a"},
+    {num:5, title:"Part 05", videoId:"1Dv0qcHG0WwJUU8MJCCTCsVXr8zOMlfbX", notesId:"1kpTR6wJWnV8Y-DTbpWKvSRCIgQ6SLNKy"},
+    {num:6, title:"Part 06", videoId:"10dBbr71auxz1bGXC_Ox9H9VfEe5p92CL", notesId:"1wVPKB7G_q2I5cuBPUAAIp6PKgSh9p_SI"},
+    {num:7, title:"Part 07", videoId:"1YrGPA3ol9uuGWYtMqpTfkdi8Jit9GUuj", notesId:"1IlrCOQ0UqlLsvDdA66K7VJh8EkjfvM4E"},
+    {num:8, title:"Part 08", videoId:"1Unw1M9us0BxYW-RKIjDCY2dSg5d2qdt_", notesId:"14B1xcv_wCGaFO9GeuUW-QWnUpAWNoyxk"},
+    {num:9, title:"Part 09", videoId:"171dvrQcpWwFF3jOBnwZ08YpZ62EsE6Wh", notesId:"1Z8VnCJwoWvsCOpZZmPdSWNFqgyfFXFvw"},
+    {num:10,title:"Part 10", videoId:"1o1QPjW4iaBpxFirZ_jOP1Sm4vDn6_cnN", notesId:"1belo8ExNnURVLuEReBx5SpJclSZM5IzP"},
+    {num:11,title:"Part 11 (Rescheduled)", videoId:"1KWQQwoJ8sxlzdKYawoTNgcUL1b-U_L7q", notesId:"1GzfxJiJhzg2WeeX5T9uHVGRhNaXIOsaE"},
+    {num:12,title:"Part 12", videoId:"1ptXvWBv6L3U-prtaXK-hsoI-KHOUxrXJ", notesId:"1_zVcMG0cKkg5KGty6KwPAcl85NhnX8Di"},
+  ], dppPdfs:[
+    {title:"Algorithms — DPP 01",                  id:"1kMVM8sEDsTVuNwjmaTpqbCASmiyAOyPT"},
+    {title:"Algorithms — DPP 01 Discussion Notes", id:"1D8ocHbczCnJEj6BcYXDSKwuP_VEyyJV5"},
+    {title:"Algorithms — DPP 02",                  id:"17HKzcWq3__9WtuKfg0ddnt2XW8KKEW9n"},
+    {title:"Algorithms — DPP 02 Discussion Notes", id:"15ihggy9uWeFHLBZnwKKw9GAhZH2nM3up"},
+  ], dppVideos:["1Nepterw6udqc_0UZq2keBP0ugV57C3rO","1rYynPT8Nuv7H9CA0R_Rzst1qaQJM8KbA"]},
+
+  { code:"CH-02", name:"Sorting Algorithms", lectures:[
+    {num:1,title:"Sorting Part 01", videoId:"1oH8NEiLuuqO8RZPQ6Z8WRP71sGGrnR4J", notesId:"1SbRprhTwbCrkfqk95yajoRSGff4RMpRB"},
+    {num:2,title:"Sorting Part 02", videoId:"1f5NiQruvkPrmQjhNi7QP-sw_c63HfC6g", notesId:"1aqD04GLbLzX_Q3YCovh7xLl7A4dUss1e"},
+    {num:3,title:"Sorting Part 03", videoId:"15EEc-1Zrio1cRsrx-UPa5iVT3PDQgFN1", notesId:"1V-hfht_OlEi_trjuwN3_waNeFEvF3Abt"},
+  ], dppPdfs:[
+    {title:"Sorting Algorithms — DPP 01 Discussion Notes", id:"1t7ZUyZsZ8vmiVVU5MQ9mXpmBIavqfWBP"},
+  ], dppVideos:["1CDJq6UdelCh87Md8f_mMFwrKqOmYUqn2"]},
+
+  { code:"CH-03", name:"Divide and Conquer", lectures:[
+    {num:1,title:"Part 01", videoId:"1dpP26dMbfQ91QO7uuGSVanPArr5VOJsa", notesId:"1VUziYSIlkspQX8i3oJKhv7kfkIa5ANlX"},
+    {num:2,title:"Part 02", videoId:"15rnc-0kBAPoA0AHkKIdrRrEVkn-FqTPz", notesId:"1DrI4ySJWBxndnFRaiX3YVh3FJJ8dv0At"},
+    {num:3,title:"Part 03", videoId:"1NvVnUduoFjXdgQcdPiae-VjY3HYdZzx-", notesId:"19_Fl6hse5AfkoKNU8tb4KDlYrSn5rNZx"},
+    {num:4,title:"Part 04", videoId:"10bfG2xSidM0TRHoUBLeV9IvTzK0Mg6RL", notesId:"1pu2FOh3N6OxXg2CGj8Og2JBprRT2ss7N"},
+    {num:5,title:"Part 05", videoId:"1WNXcrPoV25cDu8aXAMw3lMLhsOtAQW3L", notesId:"12GvmpN7C5nZfogn2qoIMiUcCVRZ64acR"},
+    {num:6,title:"Part 06", videoId:"1qNoxStOMB7eAZqApddoDa6yPMPlVkYyt", notesId:"17YccUkAnwJ1rzgFxW9A0IyFg2NAKf5qZ"},
+    {num:7,title:"Part 07 (Rescheduled)", videoId:"1twvPqeO45ZPFOcOJf4dolRsefjfzgeXu", notesId:"1UIrU2lkU0gHo8w9kfhUh889quhBSo7-N"},
+    {num:8,title:"Part 08", videoId:"1EULPxkxD4nLHB3NWNRKAIr4_gQo_kzBt", notesId:"1XoX5OhSr22sN-5VAlls5KOeP_h2vxNDp"},
+  ], dppPdfs:[
+    {title:"Divide and Conquer — DPP 01",                  id:"157RJwejIdEVzgGXQwf8HFZoe_EN42peo"},
+    {title:"Divide and Conquer — DPP 01 Discussion Notes", id:"1UTdiTfr0w890JXXMOi88rhMd9Js3XzwZ"},
+  ], dppVideos:["1ye2WodFvwcsPzqGn7O16haiR6qywVvjz"]},
+
+  { code:"CH-04", name:"Greedy Method", lectures:[
+    {num:1,title:"Part 01", videoId:"1tClBKsbVNT3CHe27TK1jSRmTJDPyL8ok", notesId:"1g4OX0NvraDQUDAc3i2qYF1iUkXhOAkDp"},
+    {num:2,title:"Part 02", videoId:"1xzhMJNcN1orqyw8ksBYIbDAYKLzdoGLf", notesId:"1j0WbaQSfdNkO1HD69BBere8ebmfS5V4N"},
+    {num:3,title:"Part 03", videoId:"1tG5MpzhTnnWiY3BiLXxn639YD6xnKUWn", notesId:"1J8Yfx2-uO_kW11UTtXMP6j2x8kZZJfuy"},
+    {num:4,title:"Part 04", videoId:"1_hcCJ6bEs_XNqbd1lbx_rOEewXGf8C0e", notesId:"1CGbTe5eGx-RdNCJzjGfe3iV2RKqjcHZM"},
+    {num:5,title:"Part 05", videoId:"1tWbGJ8whFEb4wL96trC_yak2CCSknJxn", notesId:"13EczWMSDvqSVZrQPECcri1EAEtOnzLvd"},
+    {num:6,title:"Part 06", videoId:"1owiTuK11F6g8yMbtz7ijPcl8_nCrd0oR", notesId:"198C1u9r-VRBZA4wL7rwv-J-Cn7_JjUvm"},
+    {num:7,title:"Part 07", videoId:"1-r52NBgvP87uGKg7Co-Z5t9O64qhnqKa", notesId:"1FehnOtgaRrOtVJ6IgtVCOnZbadpbzNK5"},
+  ], dppPdfs:[
+    {title:"Greedy Method — DPP 01",                  id:"14bijV2A7mOdlwFxSJ_al3BLTursh5EhN"},
+    {title:"Greedy Method — DPP 01 Discussion Notes", id:"10bWrEVO7m7dQ0iNu-vUhe5KGr8Dek9le"},
+  ], dppVideos:["1q_itPP1-_VH1BWXPzg_p9dNOtmBptJrN"]},
+
+  { code:"CH-05", name:"Dynamic Programming", lectures:[
+    {num:1,title:"DP Part 01", videoId:"130M-RCf1zOcquEuBuIE5MTt5c6a1a0Jm", notesId:"1MVzF2Vq82_iAci73OZgsLh3z26naVtBY"},
+    {num:2,title:"DP Part 02", videoId:"1P9Vwcvw1x7ajPEMCLZRkalnxGELqn4x5", notesId:"15HF23DwrnwVGfxMm4qF8aZdoDVR2YYuQ"},
+    {num:3,title:"DP Part 03", videoId:"17UrQa-If_NKLbOzVNnv4jfMZv9-Mi9Dp", notesId:"1JS8PC-H-aJ5f5_p5VjUEl1i0M2ePTo2u"},
+    {num:4,title:"DP Part 04", videoId:"11ldpJ7jJEcgQuGe4ejea-aZlAQarGu7W", notesId:"1BqjgbdZX5augtqfwygvUUwkEprW0Xjhl"},
+    {num:5,title:"DP Part 05", videoId:"1dahcpksMdBmtkAnEezpR6-XCCWPh1xl3", notesId:"12DfxFmEmfhozUf9ybpW_auM4tEdH3sXR"},
+    {num:6,title:"DP Part 06", videoId:"1N89jkvhdD4SmcFx3i9afvqkU-TqxKF2U", notesId:"1ccMWbHk38670xE63nJlhcRSAKDD5dfEq"},
+    {num:7,title:"DP Part 07", videoId:"120RmUHuvbkkl6xCmE44IZAPzH4Fip50t", notesId:"1GvxaTpH1CUaEhYthhn6AmsugW03BDCqB"},
+    {num:8,title:"DP Part 08", videoId:"1wpya2upo57eDdMi5L_DPMmD0yxYP9679", notesId:"1B-ORc5cVppKvma6NplMBJggf4em8Bxf6"},
+  ], dppPdfs:[
+    {title:"Dynamic Programming — DPP 01",                  id:"1-dTBDU_b_e6PxQpzuEVEKi_wlyfOyvvO"},
+    {title:"Dynamic Programming — DPP 01 Discussion Notes", id:"1EvXFE8BYedvwQz-gDEZw0PjnQnjJ4xt0"},
+  ], dppVideos:["1VP57wwBtlxjezttFoc-cwhOxN5QqdqZG"]},
+
+  { code:"CH-06", name:"Graph Algorithms", lectures:[
+    {num:1,title:"Graph Algorithms Part 01", videoId:"1HG6Lx1KLF5mquPqA-XPiKGWYIPsorA3v", notesId:"1j4PZBsQCns-j2-r7fvcEnghJIpNYzXF-"},
+    {num:2,title:"Graph Algorithms Part 02", videoId:"1xryW_fx2PLJEQQ8lOh3w4hbv3-zI3A6t", notesId:"1UQ2lA0ff_Dk5MD8ObQwrJ5sPM4GfEA-_"},
+    {num:3,title:"Graph Algorithms Part 03", videoId:"1vgjZ0csqBIlNbLiifxM1RiSUQ8A1yhcA", notesId:"1TH-YD6EisVRna2GJM0QFUFk3w7htlk1O"},
+  ], dppPdfs:[], dppVideos:[]},
+
+  { code:"CH-07", name:"Heap Algorithms", lectures:[
+    {num:1,title:"Heap Algorithms Part 01", videoId:"1fbvw1W-6RcKQgDWQkk5L9UKotR3ab6CW", notesId:"141Z1A3nF-df0_tLiPBE1x-LYecPqBQWi"},
+    {num:2,title:"Heap Algorithms Part 02", videoId:"1bdk0LbPxTO_NyMz5LrD1fb1vE9kCCwzy", notesId:"1pQGzwS3pWOORi5wZX8tSf4S_5M-x9Jhy"},
+    {num:3,title:"Heap Algorithms Part 03", videoId:"18ys3F3wa5LoL0K9Rvdw9kZ6D0mQVxJzC", notesId:"1wJN9KbwBzMs1niLW1ZwgSjt1iYYu8N26"},
+  ], dppPdfs:[
+    {title:"Heap Algorithms — DPP 01",                  id:"1nVqHSvq4of_fBIWjOnPLVjpsL97f-JCV"},
+    {title:"Heap Algorithms — DPP 01 Discussion Notes", id:"1zW6X9fozsZWGeRcK9aVGbin_IKfFBhyG"},
+  ], dppVideos:["1OjylOSxftbMVrJQyYFxbDu8ap2Ct3c4B"]},
+
+  { code:"CH-08", name:"Miscellaneous", lectures:[
+    {num:1,title:"Miscellaneous Part 01", videoId:"1o7yX6C271btqRwUlIk9A5hKoZ4AphTh3", notesId:"1TGBaFf8Ub7jOWhQtQ9tXQjAWpor6OkuN"},
+    {num:2,title:"Miscellaneous Part 02", videoId:"1ThKKdJCxZLxsxKqElc2FKOv9QwAc_x-O", notesId:"17a3zuBPieYG6yo7XVy0uZ5iRBr24KVDS"},
+    {num:3,title:"Miscellaneous Part 03", videoId:"1j63I_77rrCoAGouO7Gn_qRt6MEcx5v6G", notesId:"1zdW_hNzCnzMynOONbXUn1kA9jCPDYmDi"},
+    {num:4,title:"Miscellaneous Part 04", videoId:"1kFeHDuMYvQBGSIkMfUBnKtyvW3MzitTi", notesId:"1FqB2XZkYgWuatgzLDgE8KhuI57SJk8UO"},
+  ], dppPdfs:[
+    {title:"Miscellaneous — DPP 01",                  id:"1MS0rdyrVMe1dhpf0sfLyZWwUrA4GoLu6"},
+    {title:"Miscellaneous — DPP 01 Discussion Notes", id:"1E5jxO1T_qTjIYgvs4uhcCIjhqE55mmCP"},
+  ], dppVideos:["1R90jjrPjsbhuhGdm1HerfK3o7Tq7pYIb"]},
+];}
+
+// ════════════════════════════════════
+// STATE
+// ════════════════════════════════════
+let currentUser   = null;
+let activeSubjectId = null;
+let activeChapterIdx = 0;
+let activeTab     = 'all';
+let activePrTab   = 'attachments';
+let currentLecture = null;
+let currentChapter = null;
+
+// ════════════════════════════════════
+// PROGRESS (localStorage)
+// ════════════════════════════════════
+const PROGRESS_KEY = 'parakram_progress';
+function loadProgress() { try { return JSON.parse(localStorage.getItem(PROGRESS_KEY)) || {}; } catch(e) { return {}; } }
+function saveProgress(p) { try { localStorage.setItem(PROGRESS_KEY, JSON.stringify(p)); } catch(e) {} }
+function getLectureKey(subId, chIdx, lecNum) { return `${subId}__${chIdx}__${lecNum}`; }
+function isLectureDone(subId, chIdx, lecNum) { return !!loadProgress()[getLectureKey(subId, chIdx, lecNum)]; }
+function toggleLectureDone(subId, chIdx, lecNum) {
+  const p = loadProgress(), k = getLectureKey(subId, chIdx, lecNum);
+  if (p[k]) { delete p[k]; } else { p[k] = 1; }
+  saveProgress(p);
+  renderLectures(); renderChapters(); renderStatsBar();
+}
+function getTotalLectures() {
+  let t = 0; SUBJECTS.forEach(s => s.chapters.forEach(ch => { t += ch.lectures.length; })); return t;
+}
+function getDoneLectures() { return Object.keys(loadProgress()).length; }
+function getSubjectProgress(subId) {
+  const sub = SUBJECTS.find(s => s.id === subId); if (!sub) return {done:0,total:0};
+  let total = 0, done = 0;
+  sub.chapters.forEach((ch, ci) => { ch.lectures.forEach(lec => { total++; if (isLectureDone(subId, ci, lec.num)) done++; }); });
+  return {done, total};
+}
+
+// ════════════════════════════════════
+// STATS BAR
+// ════════════════════════════════════
+function renderStatsBar() {
+  const total = getTotalLectures(), done = getDoneLectures();
+  const pct = total > 0 ? Math.round((done/total)*100) : 0;
+  const activeSubjects = SUBJECTS.filter(s => getSubjectProgress(s.id).done > 0).length;
+  const el = document.getElementById('statsBar'); if (!el) return;
+  el.innerHTML = `
+    <div class="stat-pill"><div class="stat-pill-icon" style="background:rgba(108,99,255,0.12)">📹</div><div class="stat-pill-info"><div class="stat-pill-val">${done}<span style="font-size:13px;color:var(--text2);font-weight:500"> / ${total}</span></div><div class="stat-pill-label">Lectures Completed</div></div></div>
+    <div class="stat-pill"><div class="stat-pill-icon" style="background:rgba(16,185,129,0.12)">🏆</div><div class="stat-pill-info"><div class="stat-pill-val">${pct}%</div><div class="stat-pill-label">Overall Progress</div></div></div>
+    <div class="stat-pill"><div class="stat-pill-icon" style="background:rgba(245,158,11,0.12)">📚</div><div class="stat-pill-info"><div class="stat-pill-val">${activeSubjects}<span style="font-size:13px;color:var(--text2);font-weight:500"> / 19</span></div><div class="stat-pill-label">Subjects Started</div></div></div>
+    <div class="stat-pill"><div class="stat-pill-icon" style="background:rgba(59,130,246,0.12)">🎯</div><div class="stat-pill-info"><div class="stat-pill-val">${total - done}</div><div class="stat-pill-label">Lectures Remaining</div></div></div>`;
+}
+
+// ════════════════════════════════════
+// SEARCH
+// ════════════════════════════════════
+let searchSelectedIdx = -1, searchResults = [];
+function openSearch() {
+  document.getElementById('searchOverlay').classList.add('open');
+  setTimeout(() => document.getElementById('searchInput').focus(), 50);
+  searchSelectedIdx = -1; renderSearchResults();
+}
+function closeSearch() {
+  document.getElementById('searchOverlay').classList.remove('open');
+  document.getElementById('searchInput').value = '';
+  searchResults = []; searchSelectedIdx = -1;
+}
+function handleSearchOverlayClick(e) { if (e.target === document.getElementById('searchOverlay')) closeSearch(); }
+function buildSearchIndex() {
+  const idx = [];
+  SUBJECTS.forEach(sub => { sub.chapters.forEach((ch, ci) => { ch.lectures.forEach(lec => { idx.push({ subId:sub.id, subName:sub.name, subIcon:sub.icon, chIdx:ci, chCode:ch.code, chName:ch.name, lecNum:lec.num, title:lec.title, fullTitle:`${ch.name} ${String(lec.num).padStart(2,'0')} : ${lec.title}` }); }); }); });
+  return idx;
+}
+function highlightMatch(text, query) {
+  if (!query) return text;
+  return text.replace(new RegExp(`(${query.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')})`, 'gi'), '<mark>$1</mark>');
+}
+function renderSearchResults() {
+  const q = document.getElementById('searchInput').value.trim().toLowerCase();
+  const el = document.getElementById('searchResults');
+  if (!q) { el.innerHTML = '<div class="search-empty">Start typing to search across all 19 subjects…</div>'; searchResults = []; return; }
+  searchResults = buildSearchIndex().filter(r => r.title.toLowerCase().includes(q) || r.chName.toLowerCase().includes(q) || r.subName.toLowerCase().includes(q)).slice(0, 12);
+  if (!searchResults.length) { el.innerHTML = '<div class="search-empty">No results found for "<strong>' + q + '</strong>"</div>'; return; }
+  el.innerHTML = searchResults.map((r, i) => `
+    <div class="search-result-item ${i===searchSelectedIdx?'selected':''}" onclick="jumpToLecture(${i})" onmouseover="searchSelectedIdx=${i};renderSearchResultsHighlight()">
+      <div class="sr-icon">${r.subIcon}</div>
+      <div class="sr-info"><div class="sr-title">${highlightMatch(r.fullTitle, document.getElementById('searchInput').value.trim())}</div><div class="sr-path">${r.subName} · ${r.chCode}</div></div>
+      <span class="sr-badge">${r.chCode}</span>
+    </div>`).join('');
+}
+function renderSearchResultsHighlight() { document.querySelectorAll('.search-result-item').forEach((el,i) => el.classList.toggle('selected', i===searchSelectedIdx)); }
+function handleSearchKey(e) {
+  if (e.key==='Escape') { closeSearch(); return; }
+  if (e.key==='ArrowDown') { e.preventDefault(); searchSelectedIdx=Math.min(searchSelectedIdx+1,searchResults.length-1); renderSearchResultsHighlight(); document.querySelectorAll('.search-result-item')[searchSelectedIdx]?.scrollIntoView({block:'nearest'}); }
+  else if (e.key==='ArrowUp') { e.preventDefault(); searchSelectedIdx=Math.max(searchSelectedIdx-1,0); renderSearchResultsHighlight(); document.querySelectorAll('.search-result-item')[searchSelectedIdx]?.scrollIntoView({block:'nearest'}); }
+  else if (e.key==='Enter') { if (searchSelectedIdx>=0 && searchResults[searchSelectedIdx]) jumpToLecture(searchSelectedIdx); }
+}
+function jumpToLecture(idx) {
+  const r = searchResults[idx]; if (!r) return;
+  closeSearch(); activeSubjectId=r.subId; activeChapterIdx=r.chIdx; activeTab='all';
+  document.getElementById('lecPageSubject').textContent = SUBJECTS.find(s=>s.id===r.subId)?.short || r.subId.toUpperCase();
+  goTo('lectures');
+  setTimeout(() => openPlayer(r.subId, r.chIdx, r.lecNum), 80);
+}
+
+// ════════════════════════════════════
+// KEYBOARD SHORTCUTS
+// ════════════════════════════════════
+function initKeyboardShortcuts() {
+  document.addEventListener('keydown', e => {
+    const active = document.querySelector('.page.active')?.id;
+    if ((e.ctrlKey||e.metaKey) && e.key==='k') { e.preventDefault(); openSearch(); return; }
+    if (e.key==='Escape') {
+      if (document.getElementById('searchOverlay').classList.contains('open')) { closeSearch(); return; }
+      if (document.getElementById('modalOverlay').classList.contains('open')) { closeModal(); return; }
+    }
+    if (active==='lecturesPage' && !document.getElementById('searchOverlay').classList.contains('open')) {
+      if (e.key==='ArrowRight') { e.preventDefault(); navChapter(1); }
+      if (e.key==='ArrowLeft')  { e.preventDefault(); navChapter(-1); }
+    }
+  });
+}
+function navChapter(dir) {
+  const sub = SUBJECTS.find(s=>s.id===activeSubjectId); if (!sub) return;
+  const next = activeChapterIdx + dir;
+  if (next>=0 && next<sub.chapters.length) { selectChapter(next); showToast(`${sub.chapters[next].code} — ${sub.chapters[next].name}`); }
+}
+
+
+// ════════════════════════════════════
+// AUTH
+// ════════════════════════════════════
+function login() {
+  currentUser = { name:"Kautilya", initials:"K" };
+  onLoginSuccess();
+}
+
+function onLoginSuccess() {
+  updateUserUI();
+  goTo('batches');
+  showToast('👋 Welcome, ' + currentUser.name + '!');
+}
+
+function logout() {
+  currentUser = null;
+  goTo('login');
+  showToast('👋 Logged out successfully');
+}
+
+function updateUserUI() {
+  if (!currentUser) return;
+  ['userAv','userAv2','userAv3','userAv4'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.textContent = currentUser.initials;
+  });
+  ['userName','userName2','userName3','userName4'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.textContent = currentUser.name.split(' ')[0];
+  });
+}
+
+// ════════════════════════════════════
+// ROUTING
+// ════════════════════════════════════
+function goTo(page) {
+  document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+  document.getElementById(page + 'Page').classList.add('active');
+  if (page === 'batches') renderBatches();
+  if (page === 'subjects') renderSubjects();
+  if (page === 'lectures') renderLecturesPage();
+}
+
+// ════════════════════════════════════
+// BATCHES PAGE
+// ════════════════════════════════════
+function renderBatches() {
+  const total = getTotalLectures(), done = getDoneLectures();
+  const pct = total > 0 ? Math.round((done/total)*100) : 0;
+  document.getElementById('batchGrid').innerHTML = `
+    <div class="batch-card" onclick="openBatch()">
+      <div class="batch-card-banner"><div class="batch-banner-logo">GATE</div><span class="batch-banner-tag">ACTIVE</span></div>
+      <div class="batch-card-body">
+        <div class="batch-name">Parakram GATE 2026</div>
+        <div class="batch-meta">CS & IT · Full Course · 19 Subjects</div>
+        <div class="batch-stats">
+          <div class="batch-stat">📚 <strong>19</strong> Subjects</div>
+          <div class="batch-stat">📹 <strong>${total}</strong> Lectures</div>
+          <div class="batch-stat">✅ <strong>${done}</strong> Done</div>
+        </div>
+      </div>
+      <div class="batch-card-footer">
+        <div>
+          <div class="batch-progress-label">Overall Progress — ${pct}%</div>
+          <div class="batch-progress-bar"><div class="batch-progress-fill" style="width:${pct}%"></div></div>
+        </div>
+        <button class="btn-enter">Open →</button>
+      </div>
+    </div>`;
+}
+
+function openBatch() { goTo('subjects'); }
+
+// ════════════════════════════════════
+// SUBJECTS PAGE
+// ════════════════════════════════════
+function renderSubjects() {
+  renderStatsBar();
+  document.getElementById('subjectsGrid').innerHTML = SUBJECTS.map(s => {
+    const prog = getSubjectProgress(s.id);
+    const pct  = prog.total > 0 ? Math.round((prog.done/prog.total)*100) : 0;
+    return `
+    <div class="subject-card ${s.color}" onclick="openSubject('${s.id}')">
+      <div class="subject-icon">${s.icon}</div>
+      ${prog.done > 0 ? `<span class="subject-done-badge">${pct}%</span>` : ''}
+      <div>
+        <div class="subject-name">${s.name}</div>
+        <div class="subject-meta">${s.chapters.length > 0 ? prog.done+'/'+prog.total+' done · '+s.chapters.length+' chapters' : 'Coming soon'}</div>
+      </div>
+      <div class="subject-progress">
+        <div class="subject-progress-fill" style="width:${pct}%"></div>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function openSubject(id) {
+  const sub = SUBJECTS.find(s => s.id === id);
+  if (!sub) return;
+  if (sub.chapters.length === 0) { showToast('⏳ ' + sub.short + ' content coming soon!'); return; }
+  activeSubjectId = id;
+  activeChapterIdx = 0;
+  activeTab = 'all';
+  document.getElementById('lecPageSubject').textContent = sub.short;
+  goTo('lectures');
+}
+
+// ════════════════════════════════════
+// LECTURES PAGE
+// ════════════════════════════════════
+function renderLecturesPage() {
+  renderChapters();
+  renderLectures();
+}
+
+function renderChapters() {
+  const sub = SUBJECTS.find(s => s.id === activeSubjectId);
+  if (!sub) return;
+  document.getElementById('chapterList').innerHTML = sub.chapters.map((ch, i) => {
+    const done  = ch.lectures.filter(l => isLectureDone(activeSubjectId, i, l.num)).length;
+    const total = ch.lectures.length;
+    return `
+    <div class="ch-item ${i === activeChapterIdx ? 'active' : ''}" onclick="selectChapter(${i})">
+      <span class="ch-badge">${ch.code}</span>
+      <span class="ch-label">${ch.name}
+        ${done > 0 ? `<span style="font-size:10px;color:var(--green);font-weight:700;margin-left:4px">${done}/${total}</span>` : ''}
+      </span>
+    </div>`;
+  }).join('');
+}
+
+function selectChapter(idx) {
+  activeChapterIdx = idx;
+  renderChapters();
+  renderLectures();
+}
+
+function setTab(el, tab) {
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  el.classList.add('active');
+  activeTab = tab;
+  renderLectures();
+}
+
+function renderLectures() {
+  const sub = SUBJECTS.find(s => s.id === activeSubjectId);
+  if (!sub) return;
+  const ch = sub.chapters[activeChapterIdx];
+  if (!ch) return;
+
+  document.getElementById('activeChapterTitle').textContent = ch.code + ' — ' + ch.name;
+  const list = document.getElementById('lectureList');
+
+  if (activeTab === 'notes') {
+    list.innerHTML = ch.lectures.map(lec => `
+      <div class="res-card">
+        <div class="res-icon" style="background:rgba(108,99,255,0.12)">📄</div>
+        <div class="res-info">
+          <div class="res-name">${ch.name} ${String(lec.num).padStart(2,'0')} : Class Notes</div>
+          <div class="res-meta">PDF · Lecture ${lec.num}</div>
+        </div>
+        <a class="btn-res" href="${driveView(lec.notesId)}" target="_blank">View</a>
+        <a class="btn-res green" href="${driveDownload(lec.notesId)}" target="_blank" style="margin-left:4px">⬇</a>
+      </div>
+    `).join('');
+    return;
+  }
+
+  if (activeTab === 'dpp') {
+    if (!ch.dppPdfs.length) { list.innerHTML = '<div class="empty"><div class="empty-icon">📋</div>No DPPs available</div>'; return; }
+    list.innerHTML = ch.dppPdfs.map(d => `
+      <div class="res-card">
+        <div class="res-icon" style="background:rgba(245,158,11,0.12)">📋</div>
+        <div class="res-info">
+          <div class="res-name">${d.title}</div>
+          <div class="res-meta">PDF · Practice Problems</div>
+        </div>
+        <a class="btn-res" href="${driveView(d.id)}" target="_blank">View</a>
+        <a class="btn-res green" href="${driveDownload(d.id)}" target="_blank" style="margin-left:4px">⬇</a>
+      </div>
+    `).join('');
+    return;
+  }
+
+  // All / Videos
+  list.innerHTML = ch.lectures.map(lec => {
+    const done = isLectureDone(activeSubjectId, activeChapterIdx, lec.num);
+    return `
+    <div class="lec-card ${done ? 'done' : ''}">
+      <div class="lec-card-main">
+        <div class="lec-thumb" onclick="openPlayer('${activeSubjectId}',${activeChapterIdx},${lec.num})">
+          <div class="lec-num">${String(lec.num).padStart(2,'0')}</div>
+          <div class="play-circle">
+            <svg width="10" height="10" viewBox="0 0 24 24" fill="#6c63ff"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+          </div>
+          ${done ? '<div class="done-check">✓</div>' : ''}
+        </div>
+        <div class="lec-info">
+          <div class="lec-meta">LECTURE <span>${lec.num}</span></div>
+          <div class="lec-title">${ch.name} ${String(lec.num).padStart(2,'0')} : ${lec.title}</div>
+          <div class="lec-actions">
+            <button class="btn-play" onclick="openPlayer('${activeSubjectId}',${activeChapterIdx},${lec.num})">
+              ▶ Watch Lecture
+            </button>
+            <button class="btn-attach" onclick="openModal('${activeSubjectId}',${activeChapterIdx},${lec.num})">
+              📎 Attachments
+              <span class="attach-num">${ch.dppPdfs.length + ch.dppVideos.length + 1}</span>
+            </button>
+            <button class="btn-done ${done ? 'marked' : ''}" onclick="toggleLectureDone('${activeSubjectId}',${activeChapterIdx},${lec.num})">
+              ${done ? '✅ Done' : '☐ Mark Done'}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+// ════════════════════════════════════
+// PLAYER PAGE
+// ════════════════════════════════════
+function openPlayer(subId, chIdx, lecNum) {
+  const sub = SUBJECTS.find(s => s.id === subId);
+  const ch  = sub.chapters[chIdx];
+  const lec = ch.lectures.find(l => l.num === lecNum);
+  if (!lec) return;
+
+  activeSubjectId  = subId;
+  activeChapterIdx = chIdx;
+  currentLecture   = lec;
+  currentChapter   = ch;
+
+  // Load video
+  vpLoad(lec.videoId);
+
+  // Update info bar
+  document.getElementById('playerTitle').textContent = `${ch.name} ${String(lec.num).padStart(2,'0')} : ${lec.title}`;
+  document.getElementById('playerSubject').textContent = sub.short;
+  document.getElementById('playerChapter').textContent = ch.code + ' — ' + ch.name;
+  document.getElementById('playerSubjectCrumb').textContent = sub.short;
+  document.getElementById('playerLectureCrumb').textContent = 'Lecture ' + lec.num;
+
+  // Done status
+  const doneTag = document.getElementById('playerDoneTag');
+  if (doneTag) doneTag.textContent = isLectureDone(subId, chIdx, lecNum) ? ' · ✅ Done' : '';
+
+  // Toolbar label
+  const vpLabel = document.getElementById('vpLabel');
+  if (vpLabel) vpLabel.textContent = `${sub.short} · ${ch.code} · Lecture ${lec.num}`;
+
+  // Prev / Next button states
+  const lecIdx = ch.lectures.findIndex(l => l.num === lecNum);
+  const prevBtn = document.getElementById('vpPrevBtn');
+  const nextBtn = document.getElementById('vpNextBtn');
+  if (prevBtn) prevBtn.disabled = lecIdx <= 0;
+  if (nextBtn) nextBtn.disabled = lecIdx >= ch.lectures.length - 1;
+
+  activePrTab = 'attachments';
+  document.querySelectorAll('.pr-tab').forEach(t => t.classList.remove('active'));
+  document.querySelector('.pr-tab').classList.add('active');
+  renderPlayerRight();
+
+  goTo('player');
+}
+
+function setPrTab(el, tab) {
+  document.querySelectorAll('.pr-tab').forEach(t => t.classList.remove('active'));
+  el.classList.add('active');
+  activePrTab = tab;
+  renderPlayerRight();
+}
+
+function renderPlayerRight() {
+  const ch  = currentChapter;
+  const lec = currentLecture;
+  if (!ch || !lec) return;
+  const body = document.getElementById('playerRightBody');
+  const sub  = SUBJECTS.find(s => s.id === activeSubjectId);
+
+  if (activePrTab === 'attachments') {
+    body.innerHTML = `
+      <div class="pr-section-title">📄 CLASS NOTES</div>
+      <div class="pr-item" onclick="window.open('${driveView(lec.notesId)}','_blank')">
+        <div class="pr-item-icon">📄</div>
+        <div class="pr-item-name">${ch.name} ${String(lec.num).padStart(2,'0')} : Class Notes</div>
+        <span class="pr-item-action">View →</span>
+      </div>
+      <div class="pr-item" onclick="window.open('${driveDownload(lec.notesId)}','_blank')">
+        <div class="pr-item-icon">⬇️</div>
+        <div class="pr-item-name">Download Notes PDF</div>
+        <span class="pr-item-action">Save</span>
+      </div>
+
+      ${ch.dppPdfs.length ? `
+      <div class="pr-section-title" style="margin-top:14px">📋 DPP PDFs</div>
+      ${ch.dppPdfs.map(d => `
+        <div class="pr-item" onclick="window.open('${driveView(d.id)}','_blank')">
+          <div class="pr-item-icon">📋</div>
+          <div class="pr-item-name">${d.title}</div>
+          <span class="pr-item-action">View →</span>
+        </div>
+      `).join('')}` : ''}
+
+      ${ch.dppVideos.length ? `
+      <div class="pr-section-title" style="margin-top:14px">🎬 DPP VIDEOS</div>
+      ${ch.dppVideos.map((vid, i) => `
+        <div class="pr-item" onclick="playDppVideo('${vid}', ${i+1})">
+          <div class="pr-item-icon">🎬</div>
+          <div class="pr-item-name">DPP Solution Video ${i+1}</div>
+          <span class="pr-item-action">▶ Play</span>
+        </div>
+      `).join('')}` : ''}
+    `;
+  } else {
+    // Playlist — all lectures in this chapter
+    body.innerHTML = `
+      <div class="pr-section-title">${ch.code} · ${ch.lectures.length} Lectures</div>
+      ${ch.lectures.map(l => `
+        <div class="pr-item${l.num === lec.num ? ' pr-item-active' : ''}"
+             onclick="openPlayer('${activeSubjectId}',${activeChapterIdx},${l.num})">
+          <div class="pr-item-icon">${l.num === lec.num ? '▶️' : '⏸️'}</div>
+          <div class="pr-item-name">${String(l.num).padStart(2,'0')}. ${l.title}</div>
+          ${l.num === lec.num ? '<span class="pr-item-action" style="color:var(--accent2)">Now</span>' : ''}
+        </div>
+      `).join('')}
+    `;
+  }
+}
+
+function playDppVideo(videoId, num) {
+  vpLoad(videoId);
+  document.getElementById('playerTitle').textContent = currentChapter.name + ' — DPP Solution Video ' + num;
+}
+
+// ════════════════════════════════════
+// ATTACHMENT MODAL
+// ════════════════════════════════════
+function openModal(subId, chIdx, lecNum) {
+  const sub = SUBJECTS.find(s => s.id === subId);
+  const ch  = sub.chapters[chIdx];
+  const lec = ch.lectures.find(l => l.num === lecNum);
+  if (!lec) return;
+
+  document.getElementById('modalTitle').textContent = 'Attachments';
+  document.getElementById('modalSub').textContent = `${ch.name} · Lecture ${lec.num} : ${lec.title}`;
+
+  let html = `
+    <div class="modal-section">
+      <div class="modal-section-title">📄 CLASS NOTES</div>
+      <div class="modal-items">
+        <div class="modal-item">
+          <div class="modal-item-icon" style="background:rgba(108,99,255,0.12)">📄</div>
+          <div class="modal-item-info">
+            <div class="modal-item-name">${ch.name} ${String(lec.num).padStart(2,'0')} : Class Notes</div>
+            <div class="modal-item-meta">PDF · Class Notes</div>
+          </div>
+          <div class="modal-btns">
+            <a class="mbtn" href="${driveView(lec.notesId)}" target="_blank">View</a>
+            <a class="mbtn outline" href="${driveDownload(lec.notesId)}" target="_blank">⬇</a>
+          </div>
+        </div>
+      </div>
+    </div>`;
+
+  if (ch.dppPdfs.length) {
+    html += `
+      <div class="modal-section">
+        <div class="modal-section-title">📋 DPP PDFs</div>
+        <div class="modal-items">
+          ${ch.dppPdfs.map(d => `
+            <div class="modal-item">
+              <div class="modal-item-icon" style="background:rgba(245,158,11,0.12)">📋</div>
+              <div class="modal-item-info">
+                <div class="modal-item-name">${d.title}</div>
+                <div class="modal-item-meta">PDF · Practice Problems</div>
+              </div>
+              <div class="modal-btns">
+                <a class="mbtn" href="${driveView(d.id)}" target="_blank">View</a>
+                <a class="mbtn outline" href="${driveDownload(d.id)}" target="_blank">⬇</a>
+              </div>
+            </div>
+          `).join('')}
+        </div>
+      </div>`;
+  }
+
+  if (ch.dppVideos.length) {
+    html += `
+      <div class="modal-section">
+        <div class="modal-section-title">🎬 DPP VIDEOS</div>
+        <div class="modal-items">
+          ${ch.dppVideos.map((vid, i) => `
+            <div class="modal-item">
+              <div class="modal-item-icon" style="background:rgba(124,58,237,0.12)">🎬</div>
+              <div class="modal-item-info">
+                <div class="modal-item-name">DPP Solution Video ${i+1}</div>
+                <div class="modal-item-meta">Video</div>
+              </div>
+              <div class="modal-btns">
+                <button class="mbtn watch" onclick="openPlayer('${subId}',${chIdx},${lec.num});setTimeout(()=>vpLoad('${vid}'),100);closeModal()">▶ Play</button>
+                <a class="mbtn outline" href="${driveView(vid)}" target="_blank">Open</a>
+              </div>
+            </div>
+          `).join('')}
+        </div>
+      </div>`;
+  }
+
+  document.getElementById('modalBody').innerHTML = html;
+  document.getElementById('modalOverlay').classList.add('open');
+}
+
+function closeModal() { document.getElementById('modalOverlay').classList.remove('open'); }
+function handleOverlayClick(e) { if (e.target === document.getElementById('modalOverlay')) closeModal(); }
+
+// ════════════════════════════════════
+// TOAST
+// ════════════════════════════════════
+function showToast(msg) {
+  const t = document.createElement('div');
+  t.className = 'toast';
+  t.textContent = msg;
+  document.body.appendChild(t);
+  setTimeout(() => t.remove(), 3000);
+}
+
+// ════════════════════════════════════
+// INIT
+// ════════════════════════════════════
+window.onload = () => {
+  initKeyboardShortcuts();
+};
